@@ -20,6 +20,17 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.6
+
+* **agent が自分の sandbox の mount table を読んでいた**（バグ修正）。
+  生成される systemd unit は `ProtectSystem=strict` を設定するため、
+  サービスは**ファイルシステム全体が read-only に再マウントされた
+  専用の mount namespace**で動く。probe が読んでいた `/proc/self/mounts` は
+  その内側から見た姿であり、**書き込み可能な NFS 共有が全ノードで
+  read-only と報告されていた。** 自分の sandbox を説明して、
+  それをホストの状態と称していたことになる。
+  ホストの mount table（`/proc/1/mounts`）を読むようにした。
+
 ## v0.3.5
 
 * **到達性 probe が SSH ポートを無視して 22 番に固定されていた**（バグ修正）。

@@ -17,6 +17,18 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.6 での修正
+
+**agent が自分の sandbox の mount table を読んでいました。**
+
+生成される systemd unit の `ProtectSystem=strict` により、サービスは
+ファイルシステム全体が read-only に再マウントされた専用 namespace で動きます。
+probe が読んでいた `/proc/self/mounts` はその内側の姿なので、
+**書き込み可能な NFS 共有が全ノードで read-only と報告されます。**
+
+ホストの mount table（`/proc/1/mounts`）を読むよう修正しました。
+v0.3.5 以前を使っている場合、NFS mount の状態は信用できません。
+
 ## v0.3.5 での修正
 
 **実クラスタで見つかった誤検知 2 件です。バイナリの更新が必要です。**

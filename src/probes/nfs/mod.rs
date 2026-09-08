@@ -13,7 +13,7 @@
 //!
 //! | Probe | Touches the filesystem | Safe during an outage |
 //! | --- | --- | --- |
-//! | `nfs.client.mount` | no — reads `/proc/self/mounts` | yes |
+//! | `nfs.client.mount` | no — reads the host's mount table | yes |
 //! | `nfs.server.port` | no — TCP connect | yes |
 //! | `nfs.server.exports` | no — reads a local file | yes |
 //! | `nfs.client.io` | **yes** — one bounded `stat()` | **no**, and it is limited to one at a time |

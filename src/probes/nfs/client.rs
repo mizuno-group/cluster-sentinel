@@ -66,7 +66,7 @@ pub fn classify_latency(latency: Duration, slow_after: Duration) -> NfsStatus {
 
 /// Reports which NFS filesystems are mounted, and how.
 ///
-/// Reads `/proc/self/mounts` only, which is a read of kernel state and does not
+/// Reads the host's mount table only, which is a read of kernel state and does not
 /// touch the filesystems it describes. Safe even when every mount is hung.
 #[derive(Debug, Clone)]
 pub struct NfsMountProbe {
@@ -81,7 +81,7 @@ impl Default for NfsMountProbe {
 }
 
 impl NfsMountProbe {
-    /// A probe reading the real `/proc/self/mounts`.
+    /// A probe reading the host's real mount table.
     pub fn new() -> Self {
         Self {
             definition: ProbeDefinition::new(PROBE_CLIENT_MOUNT)
@@ -89,7 +89,9 @@ impl NfsMountProbe {
                 .targeting([EntityType::Host])
                 .every(Duration::from_secs(30))
                 .within(Duration::from_secs(5)),
-            mounts_path: PathBuf::from("/proc/self/mounts"),
+            // Not /proc/self/mounts: under `ProtectSystem=strict` that is the
+            // service's own namespace, where everything is read-only.
+            mounts_path: PathBuf::from(crate::agent::system::HOST_MOUNTS_PATH),
         }
     }
 
@@ -102,6 +104,7 @@ impl NfsMountProbe {
     /// The NFS mounts currently present.
     pub fn nfs_mounts(&self) -> Vec<MountInfo> {
         std::fs::read_to_string(&self.mounts_path)
+            .or_else(|_| std::fs::read_to_string("/proc/self/mounts"))
             .map(|text| parse_mounts(&text).into_iter().filter(|m| m.is_nfs()).collect())
             .unwrap_or_default()
     }

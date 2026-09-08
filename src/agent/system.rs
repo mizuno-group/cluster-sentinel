@@ -202,6 +202,32 @@ pub trait SystemInspector: Send + Sync {
     fn hardware(&self) -> HardwareSummary;
 }
 
+/// The host's mount table, as opposed to this process's view of it.
+///
+/// **Not `/proc/self/mounts`.** The generated systemd unit sets
+/// `ProtectSystem=strict`, which gives the service its own mount namespace
+/// with the whole hierarchy remounted read-only. Reading its own table there
+/// reports every filesystem on the host as `ro` -- so an agent under its own
+/// hardening declared a perfectly writable NFS share read-only, describing
+/// its sandbox and calling it the machine.
+///
+/// PID 1 is in the host's namespace, and its table is world-readable. In a
+/// container PID 1 is the container's init, which is the right answer there
+/// too.
+pub const HOST_MOUNTS_PATH: &str = "/proc/1/mounts";
+
+/// Read [`HOST_MOUNTS_PATH`], falling back to this process's own table.
+///
+/// Reading either is a read of kernel state: it does not touch the
+/// filesystems it lists, so it is safe even when an NFS mount is hung.
+/// Calling `df` or `stat` here would not be (SPEC.md §75).
+pub fn read_host_mounts() -> Vec<MountInfo> {
+    std::fs::read_to_string(HOST_MOUNTS_PATH)
+        .or_else(|_| std::fs::read_to_string("/proc/self/mounts"))
+        .map(|text| parse_mounts(&text))
+        .unwrap_or_default()
+}
+
 /// The real Linux implementation.
 #[derive(Debug, Clone, Default)]
 pub struct LinuxInspector;
@@ -263,12 +289,7 @@ impl SystemInspector for LinuxInspector {
     }
 
     fn mounts(&self) -> Vec<MountInfo> {
-        // /proc/self/mounts is a read of kernel state: it does not touch the
-        // filesystems it lists, so it is safe even when an NFS mount is hung.
-        // Calling `df` or `stat` here would not be (SPEC.md §75).
-        std::fs::read_to_string("/proc/self/mounts")
-            .map(|text| parse_mounts(&text))
-            .unwrap_or_default()
+        read_host_mounts()
     }
 
     fn hardware(&self) -> HardwareSummary {
@@ -288,7 +309,7 @@ impl SystemInspector for LinuxInspector {
     }
 }
 
-/// Parse `/proc/self/mounts`.
+/// Parse a `/proc/*/mounts` table.
 pub fn parse_mounts(text: &str) -> Vec<MountInfo> {
     text.lines()
         .filter_map(|line| {
@@ -610,5 +631,27 @@ fileserver:/export/home /home nfs4 rw,relatime,vers=4.2 0 0
         );
         assert!(inspector.path_exists(Path::new("/etc/slurm/slurm.conf")));
         assert_eq!(inspector.read_file(Path::new("/etc/nothing")), None);
+    }
+}
+
+#[cfg(test)]
+mod host_mounts_tests {
+    use super::*;
+
+    #[test]
+    fn the_host_mount_table_is_read_not_this_process_s() {
+        // ProtectSystem=strict gives the service a namespace with everything
+        // remounted read-only; reading its own table there describes the
+        // sandbox and calls it the host.
+        assert_eq!(HOST_MOUNTS_PATH, "/proc/1/mounts");
+    }
+
+    #[test]
+    fn a_writable_nfs_mount_is_not_read_only() {
+        let line = "192.0.2.52:/tank /workspace/fs nfs4 rw,noatime,vers=4.2,hard,proto=tcp,sec=sys,addr=192.0.2.52 0 0";
+        let mounts = parse_mounts(line);
+        assert_eq!(mounts.len(), 1);
+        assert!(mounts[0].is_nfs());
+        assert!(!mounts[0].is_read_only(), "rw was read as read-only");
     }
 }
