@@ -151,6 +151,16 @@ impl RemoteObserver {
 
     /// Probe one entity with every applicable probe.
     pub async fn observe(&self, entity: &ManagedEntity) -> Vec<Observation> {
+        // An entity cannot vouch for itself, here for the same reason peer
+        // assignment refuses it: a controller reporting that its own host
+        // answers has established nothing -- if it were not answering, it
+        // would not be asking. Leaving the host UNKNOWN says the true thing,
+        // which is that nobody independent has looked at it, and points at
+        // the fix: run an agent there, or give it a peer observer.
+        if self.observer_entity == Some(entity.id) {
+            return Vec::new();
+        }
+
         let Some(endpoint) = endpoint_for(entity) else {
             return Vec::new();
         };
@@ -301,13 +311,40 @@ mod tests {
         // SPEC.md §15: a host without an agent must not be probed for one.
         let observer = RemoteObserver::new();
 
-        let bare = unreachable_host("node-a", &[]).await;
-        assert!(observer.observe(&bare).await.is_empty(), "no capabilities, no probes");
-
         let with_ssh = unreachable_host("node-b", &["ssh.server"]).await;
         let observations = observer.observe(&with_ssh).await;
-        assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0].probe_id.as_str(), crate::probes::ssh::PROBE_ID);
+        let probes: Vec<&str> = observations.iter().map(|o| o.probe_id.as_str()).collect();
+
+        assert!(probes.contains(&crate::probes::ssh::PROBE_ID));
+        assert!(
+            !probes.contains(&crate::probes::sentinel_rpc::PROBE_ID),
+            "the host has no agent capability"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_with_no_capabilities_is_still_checked_for_reachability() {
+        // A host discovered from Slurm has `slurm.compute` and nothing else
+        // until an agent registers. If reachability were gated on a
+        // capability, such a host would be listed as healthy on the strength
+        // of what Slurm says, without anyone having contacted it.
+        let observer = RemoteObserver::new();
+        let bare = unreachable_host("node-a", &[]).await;
+
+        let observations = observer.observe(&bare).await;
+        let probes: Vec<&str> = observations.iter().map(|o| o.probe_id.as_str()).collect();
+
+        assert_eq!(probes, vec![crate::probes::network::PROBE_ID]);
+    }
+
+    #[tokio::test]
+    async fn the_observer_does_not_vouch_for_its_own_host() {
+        // A controller reporting that its own host answers has established
+        // nothing: if it were not answering, it would not be asking.
+        let entity = unreachable_host("controller", &["ssh.server"]).await;
+        let observer = RemoteObserver::new().observed_by(entity.id);
+
+        assert!(observer.observe(&entity).await.is_empty());
     }
 
     #[tokio::test]
@@ -318,8 +355,8 @@ mod tests {
         let entity = unreachable_host("node-a", &["ssh.server"]).await;
         let observations = observer.observe(&entity).await;
 
-        assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0].observer_entity, Some(controller));
+        assert!(!observations.is_empty());
+        assert!(observations.iter().all(|o| o.observer_entity == Some(controller)));
         assert!(observations[0].is_remote(), "quorum logic needs to know who saw this");
     }
 

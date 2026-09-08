@@ -1,0 +1,27 @@
+---
+# 取得する release。
+sentinel_version: v0.3.0
+sentinel_repo: Lzh-Function/cluster-sentinel
+
+# controller と一致させること。不一致の host は別クラスタとして扱われます。
+sentinel_environment: ""
+sentinel_controller_address: ""
+
+# クラスタ内通信の NIC 名。複数 NIC の環境では必ず設定してください。
+# 空のままだと agent が推測し、`sentinel doctor` が曖昧である旨を警告します。
+sentinel_interface: ""
+
+# UI 上のグループ分けにのみ使われます。probe を有効化することはありません。
+sentinel_roles: []
+
+# この host を peer observer にするか。
+# observer は互いに異なる障害ドメインから 3 台以上選んでください。
+sentinel_observer: false
+
+# controller 上の credential の場所。
+sentinel_token_source: /etc/sentinel/token
+
+sentinel_binary_path: /usr/local/bin/sentinel
+sentinel_config_dir: /etc/sentinel
+sentinel_download_dir: /tmp
+sentinel_user: sentinel

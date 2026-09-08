@@ -25,11 +25,11 @@ fn parent_host() -> FakeInspector {
         .without_addresses()
         .with_interface_address("lo", "127.0.0.1")
         .with_interface_address("lo", "::1")
-        .with_interface_address("eno8303", "fe80::c6d6:d3ff:fe5c:8ec8")
-        .with_interface_address("vlan32", "192.168.32.2")
-        .with_interface_address("vlan32", "fe80::c6d6:d3ff:fe5c:8ec8")
-        .with_interface_address("vlan20", "192.168.20.2")
-        .with_interface_address("vlan10", "192.168.10.2")
+        .with_interface_address("eno1", "fe80::5054:ff:fe12:3456")
+        .with_interface_address("vlan103", "192.0.2.32")
+        .with_interface_address("vlan103", "fe80::5054:ff:fe12:3456")
+        .with_interface_address("vlan102", "192.0.2.20")
+        .with_interface_address("vlan101", "192.0.2.10")
         .with_interface_address("wg0", "10.0.0.1")
 }
 
@@ -92,23 +92,23 @@ fn several_vlans_are_declared_ambiguous_rather_than_guessed_at() {
     let AddressSource::Ambiguous(interfaces) = &choice.source else {
         panic!("expected ambiguity, got {:?}", choice.source);
     };
-    for expected in ["vlan10", "vlan20", "vlan32"] {
+    for expected in ["vlan101", "vlan102", "vlan103"] {
         assert!(interfaces.contains(&expected.to_string()), "{interfaces:?}");
     }
 
     let warning = choice.warning().expect("a warning");
     assert!(warning.contains("[agent] interface"), "{warning}");
-    assert!(warning.contains("vlan20"), "the options must be named: {warning}");
+    assert!(warning.contains("vlan102"), "the options must be named: {warning}");
 }
 
 #[tokio::test]
 async fn naming_the_interface_decides_what_the_agent_registers() {
     // The end-to-end claim: one line of configuration, and the address that
     // reaches the controller is the one on the cluster's own network.
-    let agent = agent(&config("interface = \"vlan20\"\n")).await;
+    let agent = agent(&config("interface = \"vlan102\"\n")).await;
     let registration = agent.registration();
 
-    assert_eq!(registration.addresses, vec!["192.168.20.2".to_string()]);
+    assert_eq!(registration.addresses, vec!["192.0.2.20".to_string()]);
 }
 
 #[tokio::test]
@@ -122,7 +122,7 @@ async fn without_it_the_agent_registers_a_plausible_but_unverified_address() {
     // Only the first is probed, so only the first has to be right; the rest
     // are kept because they are informative, the tunnel ranked last.
     let first = registration.addresses.first().expect("an address");
-    assert!(first.starts_with("192.168."), "{first}");
+    assert!(first.starts_with("192.0.2."), "{first}");
     assert_eq!(registration.addresses.last().map(String::as_str), Some("10.0.0.1"));
     assert!(agent.address_choice().warning().is_some());
 }
@@ -139,13 +139,13 @@ async fn an_explicit_address_is_registered_verbatim() {
 
 #[tokio::test]
 async fn a_named_interface_without_an_address_registers_nothing() {
-    // eno8303 has only a link-local address. Falling back to a VLAN would aim
+    // eno1 has only a link-local address. Falling back to a VLAN would aim
     // every peer at a network the operator did not choose — the exact fault
     // this setting exists to prevent. Reporting nothing lets the controller
     // fall back to the host's name, which is visible and correctable.
-    let agent = agent(&config("interface = \"eno8303\"\n")).await;
+    let agent = agent(&config("interface = \"eno1\"\n")).await;
 
     assert!(agent.registration().addresses.is_empty());
     let warning = agent.address_choice().warning().expect("a warning");
-    assert!(warning.contains("eno8303"), "{warning}");
+    assert!(warning.contains("eno1"), "{warning}");
 }

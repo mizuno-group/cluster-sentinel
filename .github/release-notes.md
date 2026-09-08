@@ -17,6 +17,26 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.1 での修正
+
+**v0.3.0 には、実機で問題になる不具合が含まれています。更新を推奨します。**
+
+* **到達性 probe が 1 つも動いていませんでした。** Slurm discovery で見つかった
+  host は `slurm.compute` capability しか持たないため、`network.tcp` を
+  要求していた reachability probe が全て skip されていました。
+  結果、**誰も接触していない host が HEALTHY と表示されます**。
+* **報告アドレスの選択。** loopback インターフェース上のアドレスを除外し、
+  物理 NIC を仮想 NIC より優先。NIC が複数ある場合は「曖昧である」と報告します
+  （`[agent] interface` で指定してください）。
+* systemd unit が `StateDirectory=` を持つため、`/var/lib/sentinel` の
+  手動作成が不要になりました。
+* ダウンロードしたディレクトリのまま `install` すると、unit が
+  消えるパスを指してしまう問題を警告するようになりました。
+* 設定ファイルの `Permission denied` が、正しい実行方法を案内します。
+* `install` が `scontrol` の有無を見て Slurm discovery を設定します。
+
+ノードが多い場合は [Ansible ロール](deploy/ansible/) を使ってください。
+
 ## 導入
 
 ```bash

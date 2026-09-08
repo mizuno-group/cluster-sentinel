@@ -107,7 +107,7 @@ container には systemd が無いため、疑似クラスタでは `journal.rea
 
 ## 実クラスタでの障害注入について
 
-`mizuno_cluster` は開発環境ではありません（`IMPLEMENTATION.md` §31, §32）。
+`example_cluster` は開発環境ではありません（`IMPLEMENTATION.md` §31, §32）。
 
 **自動実行してはならないもの:**
 

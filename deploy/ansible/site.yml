@@ -1,0 +1,13 @@
+---
+# Cluster Sentinel の agent を配布する。
+#
+# controller は 1 台なので手で構築してください（docs/DEPLOYMENT.md §4）。
+# ここは繰り返しになる部分だけを扱います。
+- name: Deploy Sentinel agents
+  hosts: agents
+  become: true
+  # 一度に全ノードを触らない。設定を間違えたときに、
+  # 気づく前に全ノードへ配り終えてしまうのを避けるため。
+  serial: "25%"
+  roles:
+    - sentinel

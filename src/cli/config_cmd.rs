@@ -30,7 +30,10 @@ pub fn init(
 ) -> anyhow::Result<i32> {
     let role = super::generate::Role::parse(role)
         .ok_or_else(|| anyhow::anyhow!("unknown role {role:?}; expected \"controller\" or \"agent\""))?;
-    let contents = super::generate::config_file(role);
+    let contents = super::generate::config_file_for(
+        role,
+        super::generate::Detected::on_this_host(&crate::agent::system::LinuxInspector::new()),
+    );
 
     if dry_run {
         print!("{contents}");

@@ -2,6 +2,10 @@
 
 実際の計算クラスタへ Cluster Sentinel を導入する手順書です。
 
+**Rust ツールチェインは不要です。** 配布物は静的リンクされた単一バイナリで、
+[Releases](https://github.com/Lzh-Function/cluster-sentinel/releases) から
+取得したものをコピーするだけです。
+
 前提として、**Sentinel は監視対象を一切変更しません。**
 reboot・`systemctl restart`・mount 操作・`scontrol update` を実行しません。
 したがって導入自体がクラスタの動作を変えることはありませんが、
@@ -14,19 +18,22 @@ reboot・`systemctl restart`・mount 操作・`scontrol update` を実行しま�
 
 ## 目次
 
-1. [事前確認](#1-事前確認)
-2. [構成の決定](#2-構成の決定)
-3. [バイナリの配置](#3-バイナリの配置)
-4. [Controller の構築](#4-controller-の構築)
-5. [cluster credential の配布](#5-cluster-credential-の配布)
-6. [Agent の展開](#6-agent-の展開)
-6.5 [監視頻度を変える](#65-監視頻度を変える)
-7. [段階的導入](#7-段階的導入)
-8. [SSH ポートが 22 でない場合](#8-ssh-ポートが-22-でない場合)
-9. [その他の非標準構成](#9-その他の非標準構成)
-10. [導入後の確認](#10-導入後の確認)
-11. [設定ファイルテンプレート](#11-設定ファイルテンプレート)
-12. [チェックリスト](#12-チェックリスト)
+| | 節 | 対象 |
+| --- | --- | --- |
+| 1 | [事前確認](#1-事前確認) | — |
+| 2 | [構成の決定](#2-構成の決定) | — |
+| 3 | [バイナリの配置](#3-バイナリの配置) | controller と agent を置く全 host |
+| 4 | [Controller の構築](#4-controller-の構築) | controller の host |
+| 5 | [cluster credential の配布](#5-cluster-credential-の配布) | 全 host |
+| 6 | [Agent の展開](#6-agent-の展開) | agent を置く各 host |
+| 6.7 | [監視頻度を変える](#67-監視頻度を変える) | 任意 |
+| 7 | [段階的導入](#7-段階的導入) | — |
+| 8 | [SSH ポートが 22 でない場合](#8-ssh-ポートが-22-でない場合) | 該当する場合 |
+| 9 | [その他の非標準構成](#9-その他の非標準構成) | 該当する場合 |
+| 9.7 | [NIC が複数ある場合](#97-nic-が複数ある場合vlanbridge複数-fabric) | **VLAN 環境は必読** |
+| 10 | [導入後の確認](#10-導入後の確認) | — |
+| 11 | [設定ファイルテンプレート](#11-設定ファイルテンプレート) | 参考 |
+| 12 | [チェックリスト](#12-チェックリスト) | — |
 
 ---
 
@@ -37,19 +44,39 @@ reboot・`systemctl restart`・mount 操作・`scontrol update` を実行しま�
 | 項目 | 内容 |
 | --- | --- |
 | OS | Linux（systemd 前提） |
-| 権限 | 各 host の root（インストール時のみ。実行は非特権ユーザー） |
+| 権限 | 各 host の root（導入時のみ。常駐は非特権ユーザー） |
 | network | agent → controller への TCP 到達性（既定 7443） |
 | | controller / peer → 各 host への TCP 到達性（SSH ポート、agent ポート 7444） |
 
+**Rust ツールチェインは不要です。** 配布されるのは静的リンクされた
+単一バイナリで、ビルド済みのものをコピーするだけです。
+
 Sentinel は Slurm を **変更しません**。既存の `slurm.conf` を書き換える必要はありません。
+
+### どの host に何を置くか
+
+導入前にこの表を埋めてください。以降の手順はこれに沿って進みます。
+
+| host | 役割 | 置くもの |
+| --- | --- | --- |
+| 1 台 | **controller** | バイナリ + 設定 + unit + credential（生成元） |
+| 監視したい host | **agent** | バイナリ + 設定 + unit + credential（controller からコピー） |
+| agent を置かない host | 外から観測されるだけ | **何も置きません**（controller の設定に宣言するだけ） |
+
+**agent を置かない host にはバイナリも設定ファイルも要りません。**
+controller と peer が外から TCP で観測します。
+ただし取得できるのは到達性・SSH・NFS ポートまでで、
+load・memory・GPU・kernel event などその host の内側は一切見えません。
 
 ### 確認しておく情報
 
-導入前に以下を控えてください。設定に必要です。
-
 ```bash
-# controller になる host 名と、agent から到達可能なアドレス
+# controller にする host の名前と、agent から到達できるアドレス
 hostname -f
+ip -o addr show
+
+# アーキテクチャ（x86_64 と ARM が混在するクラスタでは host ごとに確認）
+uname -m
 
 # Slurm の controller と node 定義（あれば）
 grep -E "^(SlurmctldHost|ControlMachine|NodeName)" /etc/slurm/slurm.conf
@@ -64,14 +91,13 @@ grep -iE "^\s*(Port|ListenAddress)" /etc/ssh/sshd_config
 
 ## 2. 構成の決定
 
-以下を決めます。
-
 | 決めること | 例 | 備考 |
 | --- | --- | --- |
-| environment 名 | `mizuno-lab` | 全 host で一致させる |
-| controller を置く host | `parent` | source code には現れない。設定だけの問題 |
-| scheduler entity 名 | `mizuno_cluster` | Slurm の ClusterName に合わせると分かりやすい |
+| environment 名 | `example-lab` | 全 host で一致させる |
+| controller を置く host | `head01` | source code には現れない。設定だけの問題 |
+| scheduler entity 名 | `example_cluster` | Slurm の ClusterName に合わせると分かりやすい |
 | observer にする host | controller / fileserver / 一部 compute | **3 台以上**を推奨（後述） |
+| クラスタ内通信の NIC | `vlan102` など | NIC が複数あるなら必須（§9.7） |
 | storage の依存関係 | どの node がどの fileserver を使うか | 誤診断を避けるために重要 |
 
 ### observer を 3 台以上にする理由
@@ -93,26 +119,87 @@ observer が 1 台しかない場合、Sentinel は **到達性の診断を行�
 
 ## 3. バイナリの配置
 
+**controller と agent を置く全 host** で行います。
+agent を置かない host には不要です。
+
+### 3.1 ダウンロード
+
+[Releases](https://github.com/Lzh-Function/cluster-sentinel/releases) から、
+その host のアーキテクチャに合うものを取得します。
+
 ```bash
-cargo build --release        # または配布された成果物を使用
-sudo install -m 0755 target/release/sentinel /usr/local/bin/sentinel
+# x86_64
+curl -fsSLO https://github.com/Lzh-Function/cluster-sentinel/releases/latest/download/sentinel-x86_64-unknown-linux-musl
+curl -fsSLO https://github.com/Lzh-Function/cluster-sentinel/releases/latest/download/sentinel-x86_64-unknown-linux-musl.sha256
+sha256sum -c sentinel-x86_64-unknown-linux-musl.sha256
+
+# ARM64
+curl -fsSLO https://github.com/Lzh-Function/cluster-sentinel/releases/latest/download/sentinel-aarch64-unknown-linux-musl
+curl -fsSLO https://github.com/Lzh-Function/cluster-sentinel/releases/latest/download/sentinel-aarch64-unknown-linux-musl.sha256
+sha256sum -c sentinel-aarch64-unknown-linux-musl.sha256
+```
+
+`uname -m` が `x86_64` なら前者、`aarch64` なら後者です。
+
+### 3.2 配置
+
+```bash
+sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
-同一アーキテクチャであれば全 host に同じバイナリを配布できます。
-host ごとのビルドは不要です。
+```
+sentinel 0.3.0
+protocol version: 1
+config version:   1
+target:           x86_64-unknown-linux-musl
+```
+
+**必ず `/usr/local/bin` に置いてから次に進んでください。**
+ダウンロードしたディレクトリのまま `sentinel install` を実行すると、
+生成される systemd unit がそのパスを指し、ディレクトリを片付けた時点で
+サービスが起動しなくなります。`install` はこの状態を警告します。
+
+静的リンクなので、glibc のバージョンや配布物の追加は不要です。
+
+```bash
+ldd /usr/local/bin/sentinel      # -> statically linked
+```
+
+同一アーキテクチャなら全 host に同じファイルを配れます。
+
+```bash
+# 例: 各 compute node へ配る
+for n in node01 node02 node03; do
+  scp sentinel-x86_64-unknown-linux-musl "$n":/tmp/sentinel
+  ssh "$n" 'sudo install -m 0755 /tmp/sentinel /usr/local/bin/sentinel && rm /tmp/sentinel'
+done
+```
 
 ---
 
 ## 4. Controller の構築
 
-### 4.1 install
+**controller にする host 1 台**で行います。
+
+### 4.1 サービスユーザーを作る
+
+`install` より先に作ってください。生成されるファイルの所有者になります。
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin sentinel
+```
+
+`/etc/sentinel` も `/var/lib/sentinel` も、**この時点では存在しなくて構いません。**
+前者は `install` が、後者は systemd が起動時に作ります。
+
+### 4.2 install
 
 ```bash
 sudo sentinel install controller
 ```
 
-これ 1 回で以下が生成されます。
+これ 1 回で、ディレクトリごと以下が生成されます。
 
 | 生成物 | 内容 |
 | --- | --- |
@@ -137,17 +224,18 @@ credential を secret manager などで別管理している場合:
 sudo sentinel install controller --no-credential
 ```
 
-### 4.2 サービスユーザー
+### 4.3 所有者を合わせる
 
-`install` が実行後に案内しますが、以下は手で行う必要があります。
+`install` は root として書くので、サービスユーザーに渡します。
 
 ```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin sentinel
-sudo install -d -o sentinel -g sentinel -m 0750 /var/lib/sentinel
 sudo chown -R sentinel:sentinel /etc/sentinel
 ```
 
-### 4.3 設定の仕上げ
+`/var/lib/sentinel`（database の置き場）は unit の `StateDirectory=` により
+**systemd が初回起動時に作成し、所有者も設定します。** 手で作る必要はありません。
+
+### 4.4 設定の仕上げ
 
 生成された `/etc/sentinel/config.toml` のうち、
 **書き換えが必要なのは `CHANGE-ME` を含む行だけ**です。
@@ -158,7 +246,7 @@ controller の場合は `environment` の 1 行です。
 Slurm の外にある fileserver や依存関係は、
 ファイル内のコメント例を参考にしてください（§11 にも同じものがあります）。
 
-### 4.4 検証
+### 4.5 検証
 
 **起動前に必ず実行してください。**
 
@@ -173,7 +261,7 @@ sudo -u sentinel sentinel config check
 「宣言されていない entity への依存」は、
 Slurm discovery や agent registration から到着する予定のものであれば正常です。
 
-### 4.5 起動
+### 4.6 起動
 
 ```bash
 sudo systemctl daemon-reload
@@ -182,16 +270,72 @@ systemctl status sentinel-controller
 journalctl -u sentinel-controller -f
 ```
 
-### 4.6 動作確認
+### 4.7 動作確認
+
+**CLI は root か `sentinel` ユーザーで実行してください。**
+
+```bash
+sudo -u sentinel sentinel status     # 推奨
+sudo sentinel status
+```
+
+一般ユーザーで実行すると設定ファイルを読めません。
+設定ファイルは world-readable にしていません
+（`[[notification.webhooks]]` の URL 自体が credential を含みうるため）。
+
+```
+$ sentinel status
+error: cannot read config file /etc/sentinel/config.toml: permission denied.
+The configuration belongs to the service user, so run one of:
+  sudo -u sentinel sentinel <command>
+  sudo sentinel <command>
+```
+
 
 ```bash
 curl -fsS http://localhost:7443/v1/health
-sentinel status
-sentinel dependency list
+sudo -u sentinel sentinel status
+sudo -u sentinel sentinel dependency list
 ```
 
-この時点では agent がいないため、多くの entity が `UNKNOWN` です。
-**これは正常です。** 観測していないものを healthy とは呼びません。
+**この時点で entity は 0 件です。これは正常です。**
+
+```
+ENVIRONMENT: example-lab
+
+No entities known yet.
+```
+
+entity が現れる経路は 2 つあり、どちらもまだ動いていないためです。
+
+**1. Slurm discovery。** `install` は `scontrol` の有無を見て
+`[discovery.slurm] enabled` を設定します。この host に `scontrol` が
+無かった場合は `false` になっているので、Slurm クラスタなら手で `true` にします。
+
+```bash
+sudo -u sentinel grep -A3 "discovery.slurm" /etc/sentinel/config.toml
+```
+
+```toml
+[discovery.slurm]
+enabled = true
+```
+
+有効にしたら、次の inventory 周期（既定 5 分）を待たずに実行できます。
+
+```bash
+sudo systemctl restart sentinel-controller
+sudo -u sentinel sentinel discover
+sudo -u sentinel sentinel status
+```
+
+**2. agent の登録。** §6 で展開すると現れます。
+
+Slurm を使っていない、あるいは Slurm の外にある host は
+`[[entities]]` で宣言します（§11.1 のテンプレート参照）。
+
+agent がいない entity が `UNKNOWN` と出るのも正常です。
+**観測していないものを healthy とは呼びません。**
 
 ---
 
@@ -212,20 +356,49 @@ sudo chmod 0400 /etc/sentinel/token
 
 配布に scp を使う場合、経由地にファイルを残さないよう注意してください。
 
-`sentinel install agent` は credential を生成しません。
-agent が自前で生成すれば、クラスタの誰も知らない credential ができてしまい、
-「設定の問題」が「認証の失敗」として現れることになるためです。
+`sentinel install agent` は credential を生成しません（§6.1）。
 
 ---
 
 ## 6. Agent の展開
 
+**agent を置く各 host** で行います。以下はすべてその host 上での作業です。
+
+前提は「§3 でバイナリを `/usr/local/bin/sentinel` に置いた」ことだけです。
+`/etc/sentinel` は存在しなくて構いません。`install` が作ります。
+
+### 6.1 サービスユーザーと install
+
 ```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin sentinel
 sudo sentinel install agent
+sudo chown -R sentinel:sentinel /etc/sentinel
 ```
 
-生成物は設定ファイルと systemd unit です。
-書き換えが必要なのは `CHANGE-ME` を含む 2 行だけです。
+生成物は 2 つです。
+
+| 生成物 | 内容 |
+| --- | --- |
+| `/etc/sentinel/config.toml` | 全設定を既定値のまま書き出した設定ファイル |
+| `/etc/systemd/system/sentinel-agent.service` | hardening 済み systemd unit |
+
+**credential は生成されません。** controller のものを配ります（§5）。
+agent が自前で生成すれば、クラスタの誰も知らない credential ができてしまい、
+「設定の問題」が「認証の失敗」として現れることになるためです。
+
+`/var/lib/sentinel`（spool の置き場）は systemd が初回起動時に作ります。
+
+### 6.2 credential を置く
+
+§5 で controller から配ったものを配置します。
+
+```bash
+sudo install -o sentinel -g sentinel -m 0400 /path/to/token /etc/sentinel/token
+```
+
+### 6.3 設定を書き換える
+
+`CHANGE-ME` を含む **2 行**だけです。
 
 ```toml
 environment = "CHANGE-ME-environment"                 # controller と一致させる
@@ -234,24 +407,38 @@ controller_address = "CHANGE-ME-controller-host:7443" # controller のアドレ�
 
 capability は agent が自動検出するため、列挙する必要はありません。
 
+**NIC が複数ある host では、もう 1 行必要です**（§9.7）。
+まず候補を確認します。
+
 ```bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin sentinel
-sudo install -d -o sentinel -g sentinel -m 0750 /var/lib/sentinel
-sudo chown -R sentinel:sentinel /etc/sentinel
-# credential を配置（§5）
+sudo sentinel doctor
+```
+
+候補が複数あると警告が出るので、`[agent]` セクションに追記します。
+
+```toml
+[agent]
+interface = "vlan102"
+```
+
+### 6.4 検証と起動
+
+```bash
 sudo -u sentinel sentinel config check
 sudo systemctl daemon-reload
 sudo systemctl enable --now sentinel-agent
+systemctl status sentinel-agent
 ```
 
-### 確認
+### 6.5 確認
 
 ```bash
-# この host が Sentinel からどう見えるか、capability の判定理由つき
-sentinel doctor
+# この host が Sentinel からどう見えるか、capability と報告アドレスの判定理由つき
+sudo sentinel doctor
 
 # controller 側から
 sentinel entity show <hostname>
+sentinel status
 ```
 
 `sentinel doctor` は capability ごとに
@@ -259,9 +446,65 @@ sentinel entity show <hostname>
 「forced on by configuration」「suggested by a role」
 のいずれかを表示します。想定と違う場合はここで分かります。
 
+報告アドレスの行に `!` の警告が残っていないことも確認してください。
+
+### 6.6 まとめて展開する場合
+
+**ノードが 10 台を超えるなら [Ansible ロール](../deploy/ansible/) を使ってください。**
+§3〜§6 をそのまま自動化してあり、アーキテクチャ別のバイナリ取得・
+チェックサム検証・credential 配布・`config check`・起動まで行います。
+
+```bash
+cd deploy/ansible
+cp inventory.example.ini inventory.ini
+$EDITOR inventory.ini
+ansible-playbook -i inventory.ini site.yml --limit node01   # まず 1 台
+ansible-playbook -i inventory.ini site.yml
+```
+
+Sentinel 側に Ansible 固有のものはありません。別の構成管理ツールなら、
+同じ手順（バイナリを置く → `sentinel install agent` → 設定と credential を配る）
+を移植してください。
+
+#### 手作業で配る場合
+
+```bash
+for n in node01 node02 node03; do
+  scp sentinel-x86_64-unknown-linux-musl "$n":/tmp/sentinel
+  scp /etc/sentinel/token "$n":/tmp/token
+  ssh "$n" '
+    sudo install -m 0755 /tmp/sentinel /usr/local/bin/sentinel
+    sudo useradd --system --no-create-home --shell /usr/sbin/nologin sentinel 2>/dev/null || true
+    sudo sentinel install agent
+    sudo install -o sentinel -g sentinel -m 0400 /tmp/token /etc/sentinel/token
+    sudo chown -R sentinel:sentinel /etc/sentinel
+    rm -f /tmp/sentinel /tmp/token
+  '
+done
+```
+
+このあと各 host の `config.toml` を書き換えます
+（`environment`、`controller_address`、必要なら `interface`）。
+3 行とも全 host で同じ値になるなら、書き換えた 1 つを配って構いません。
+
+```bash
+for n in node01 node02 node03; do
+  scp /etc/sentinel/config.toml "$n":/tmp/config.toml
+  ssh "$n" '
+    sudo install -o sentinel -g sentinel -m 0640 /tmp/config.toml /etc/sentinel/config.toml
+    sudo -u sentinel sentinel config check
+    sudo systemctl daemon-reload && sudo systemctl enable --now sentinel-agent
+    rm -f /tmp/config.toml
+  '
+done
+```
+
+> `scp` の経由地にファイルを残さないでください。credential も設定も
+> `/tmp` を通ります。
+
 ---
 
-## 6.5 監視頻度を変える
+## 6.7 監視頻度を変える
 
 生成された設定ファイルには全 probe の既定値が
 コメントアウトされた状態で書き出されています。
@@ -344,7 +587,7 @@ sentinel entity show <hostname> --json | python3 -c 'import json,sys; print(json
 
 ```toml
 [agent]
-controller_address = "parent:7443"
+controller_address = "head01:7443"
 ssh_port = 2222        # sshd_config から読めない場合のみ
 ```
 
@@ -425,7 +668,7 @@ listen = "0.0.0.0:8443"
 
 # agent 側
 [agent]
-controller_address = "parent:8443"
+controller_address = "head01:8443"
 ```
 
 ### 9.3 Slurm NodeName と hostname が異なる
@@ -600,14 +843,14 @@ peer がこの host を probe するアドレスは、agent が自動検出し�
 ```
 $ ip -o addr show
 1: lo       inet 127.0.0.1/8
-2: eno8303  inet6 fe80::c6d6:d3ff:fe5c:8ec8/64
-6: vlan32   inet 192.168.32.2/24
-7: vlan20   inet 192.168.20.2/24     ← クラスタ内通信はこれ
-8: vlan10   inet 192.168.10.2/24
+2: eno1  inet6 fe80::5054:ff:fe12:3456/64
+6: vlan103   inet 192.0.2.32/24
+7: vlan102   inet 192.0.2.20/24     ← クラスタ内通信はこれ
+8: vlan101   inet 192.0.2.10/24
 9: wg0      inet 10.0.0.1/24
 ```
 
-この host を調べても、`vlan20` が答えだと分かる手がかりはありません。
+この host を調べても、`vlan102` が答えだと分かる手がかりはありません。
 そのため Sentinel は **候補が複数あることを報告し、選択を求めます。**
 
 ```bash
@@ -615,13 +858,13 @@ sentinel doctor
 ```
 
 ```
-Address:     192.168.10.2
-  -> vlan10           192.168.10.2
-     vlan20           192.168.20.2
-     vlan32           192.168.32.2
+Address:     192.0.2.10
+  -> vlan101           192.0.2.10
+     vlan102           192.0.2.20
+     vlan103           192.0.2.32
      wg0              10.0.0.1
   ! several interfaces could be the one peers reach this host on
-    (vlan10, vlan20, vlan32); 192.168.10.2 was chosen by name order.
+    (vlan101, vlan102, vlan103); 192.0.2.10 was chosen by name order.
     Set [agent] interface to say which.
 ```
 
@@ -629,7 +872,7 @@ Address:     192.168.10.2
 
 ```toml
 [agent]
-interface = "vlan20"
+interface = "vlan102"
 ```
 
 NAT 越しなど host 自身から見えないアドレスの場合は直接指定します。
@@ -645,13 +888,13 @@ agent がいない host は、これまでどおり `[[entities]]` の `addresse
 [[entities]]
 type = "host"
 name = "filesrv01"
-addresses = ["192.168.20.30"]
+addresses = ["192.0.2.30"]
 ```
 
 #### 指定しないとどうなるか
 
 「物理 NIC に見えるもののうち名前順で最初」が選ばれます。
-上の例では `vlan10` です。**多くの場合これは間違いです。**
+上の例では `vlan101` です。**多くの場合これは間違いです。**
 
 除外されるものは決まっています（ここは自動で正しく処理されます）。
 
@@ -757,7 +1000,7 @@ sentinel config init --role agent --dry-run   # 中身だけ見る
 config_version = 1
 
 # 全 host で一致させること
-environment = "mizuno-lab"
+environment = "example-lab"
 
 [controller]
 listen = "0.0.0.0:7443"
@@ -795,7 +1038,7 @@ min_severity = "warning"
 # ---------------------------------------------------------------------------
 [[entities]]
 type = "scheduler"
-name = "mizuno_cluster"
+name = "example_cluster"
 
 # ---------------------------------------------------------------------------
 # Slurm の外にある host
@@ -854,18 +1097,18 @@ type = "provides"
 
 # filesrv01 を使う node
 [[dependencies]]
-from = "host/creator2"
+from = "host/node02"
 to   = "storage/filesrv01-storage"
 type = "uses_storage"
 
 [[dependencies]]
-from = "host/creator3"
+from = "host/node03"
 to   = "storage/filesrv01-storage"
 type = "uses_storage"
 
 # filesrv02 を使う node
 [[dependencies]]
-from = "host/creator5"
+from = "host/node05"
 to   = "storage/filesrv02-storage"
 type = "uses_storage"
 
@@ -885,10 +1128,10 @@ capability は自動検出されます。
 config_version = 1
 
 # controller と一致させること
-environment = "mizuno-lab"
+environment = "example-lab"
 
 [agent]
-controller_address = "parent:7443"
+controller_address = "head01:7443"
 spool_path = "/var/lib/sentinel/spool.db"
 
 # health endpoint。peer がここを見て
@@ -915,7 +1158,7 @@ roles = ["compute"]
 ```toml
 # controller
 config_version = 1
-environment = "mizuno-lab"
+environment = "example-lab"
 
 [controller]
 listen = "0.0.0.0:7443"
@@ -930,10 +1173,10 @@ enabled = true
 ```toml
 # agent
 config_version = 1
-environment = "mizuno-lab"
+environment = "example-lab"
 
 [agent]
-controller_address = "parent:7443"
+controller_address = "head01:7443"
 ```
 
 ---
@@ -944,21 +1187,45 @@ controller_address = "parent:7443"
 
 - [ ] environment 名を決めた
 - [ ] controller を置く host を決めた
+- [ ] agent を置く host と、置かない host を決めた
 - [ ] observer にする host を 3 台以上決めた（異なる障害ドメイン）
+- [ ] 各 host のアーキテクチャを確認した（`uname -m`。x86_64 / ARM 混在なら host ごと）
+- [ ] クラスタ内通信の NIC を確認した（複数あるなら [§9.7](#97-nic-が複数ある場合vlanbridge複数-fabric)）
 - [ ] storage の依存関係を把握した
 - [ ] SSH ポートを確認した（22 以外なら [§8](#8-ssh-ポートが-22-でない場合)）
 - [ ] agent → controller の network 到達性を確認した
 
-### 各 host
+### Controller の host
 
-- [ ] `sentinel` を `/usr/local/bin` へ配置した
-- [ ] `sentinel` ユーザーとディレクトリを作成した
-- [ ] `/etc/sentinel/token` を配置した（0400、`sentinel` 所有）
-- [ ] `/etc/sentinel/config.toml` を作成した
+- [ ] release からバイナリを取得し、`sha256sum -c` が通った
+- [ ] `/usr/local/bin/sentinel` に配置し、`sentinel version` が動いた
+- [ ] `sentinel` ユーザーを作成した（`install` より先に）
+- [ ] `sudo sentinel install controller` を実行した
+- [ ] `chown -R sentinel:sentinel /etc/sentinel` した
+- [ ] `config.toml` の `CHANGE-ME` を書き換えた（`environment`）
+- [ ] Slurm の外にある host と storage 依存を宣言した
 - [ ] `sentinel config check` が通った
-- [ ] `sentinel install <role>` で unit を生成した
 - [ ] サービスが起動し、`systemctl status` が正常
+- [ ] `curl .../v1/health` が応答した
+
+### Agent を置く各 host
+
+- [ ] そのアーキテクチャ用のバイナリを `/usr/local/bin/sentinel` に配置した
+- [ ] `sentinel` ユーザーを作成した（`install` より先に）
+- [ ] `sudo sentinel install agent` を実行した（**警告が出ていないこと**)
+- [ ] controller の `/etc/sentinel/token` を配置した（0400、`sentinel` 所有）
+- [ ] `chown -R sentinel:sentinel /etc/sentinel` した
+- [ ] `config.toml` の `CHANGE-ME` 2 行を書き換えた
+- [ ] `sentinel doctor` の報告アドレスに `!` の警告がない（あれば `interface` を指定）
 - [ ] `sentinel doctor` の capability が想定どおり
+- [ ] `sentinel config check` が通った
+- [ ] サービスが起動し、`systemctl status` が正常
+
+### agent を置かない host
+
+- [ ] controller の `config.toml` に `[[entities]]` として宣言した
+- [ ] SSH ポートが 22 以外なら `ports = { ssh = ... }` を書いた
+- [ ] IP を `addresses` で明示した
 
 ### 全体
 

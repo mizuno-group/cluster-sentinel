@@ -11,14 +11,28 @@ Cluster Sentinel を実際に運用するためのガイドです。
 
 ## 導入
 
+Rust ツールチェインは不要です。
+[Releases](https://github.com/Lzh-Function/cluster-sentinel/releases) の
+静的リンクバイナリ（x86_64 / aarch64）を配置します。
+
 ```bash
-sudo install -m 0755 target/release/sentinel /usr/local/bin/sentinel
+sha256sum -c sentinel-x86_64-unknown-linux-musl.sha256
+sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
+
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin sentinel
 sudo sentinel install controller     # または agent
+sudo chown -R sentinel:sentinel /etc/sentinel
 ```
 
-`install` は設定ファイル・systemd unit・（controller のみ）cluster credential を
-生成し、残りの手順を表示します。既存のファイルは上書きしません
-（`--force` を付けた場合のみ）。
+**先に `/usr/local/bin` へ配置してから `install` を実行してください。**
+ダウンロード先のまま実行すると、unit がそのパスを指してしまいます
+（`install` は警告します）。
+
+`install` は `/etc/sentinel` を作り、設定ファイル・systemd unit・
+（controller のみ）cluster credential を生成して、残りの手順を表示します。
+既存のファイルは上書きしません（`--force` を付けた場合のみ）。
+
+`/var/lib/sentinel` は systemd が初回起動時に作ります。
 
 生成された設定ファイルには全設定が既定値のまま書き出されています。
 書き換えが必要なのは `CHANGE-ME` を含む行だけです。
@@ -28,6 +42,8 @@ sudo -u sentinel sentinel config check
 sudo systemctl daemon-reload
 sudo systemctl enable --now sentinel-controller
 ```
+
+ノードが多い場合は [Ansible ロール](../deploy/ansible/) を使ってください。
 
 手順の詳細は [DEPLOYMENT.md](DEPLOYMENT.md) を参照してください。
 
@@ -72,6 +88,14 @@ NFS server の停止、network-wide な iptables 変更、reboot、filesystem �
 Docker / VM で代替できるものはそちらで行ってください。
 
 ## 日常の確認
+
+CLI は root か `sentinel` ユーザーで実行します。
+設定ファイルは world-readable にしていません
+（webhook URL 自体が credential を含みうるため）。
+
+```bash
+sudo -u sentinel sentinel status
+```
 
 ```bash
 sentinel status              # クラスタ全体。異常があれば exit 2

@@ -5,7 +5,7 @@
 //! probes are aimed at an address nobody can reach.
 //!
 //! Detection ranks what it finds, but ranking cannot answer the question that
-//! actually matters. A host with `vlan10`, `vlan20` and `vlan32` configured is
+//! actually matters. A host with `vlan101`, `vlan102` and `vlan103` configured is
 //! reachable on all three; **which one carries traffic between cluster nodes
 //! is a fact about the site, not about the host**, and no amount of inspection
 //! recovers it. So detection is a starting point and `[agent] interface` is
@@ -200,10 +200,10 @@ mod tests {
         FakeInspector::bare()
             .without_addresses()
             .with_interface_address("lo", "127.0.0.1")
-            .with_interface_address("eno8303", "fe80::c6d6:d3ff:fe5c:8ec8")
-            .with_interface_address("vlan32", "192.168.32.2")
-            .with_interface_address("vlan20", "192.168.20.2")
-            .with_interface_address("vlan10", "192.168.10.2")
+            .with_interface_address("eno1", "fe80::5054:ff:fe12:3456")
+            .with_interface_address("vlan103", "192.0.2.32")
+            .with_interface_address("vlan102", "192.0.2.20")
+            .with_interface_address("vlan101", "192.0.2.10")
             .with_interface_address("wg0", "10.0.0.1")
     }
 
@@ -218,7 +218,7 @@ mod tests {
     fn a_tunnel_ranks_below_a_real_interface() {
         let choice = choose(&multi_vlan_host(), &config());
         let wireguard = choice.addresses.iter().position(|a| a == "10.0.0.1");
-        let vlan = choice.addresses.iter().position(|a| a == "192.168.20.2");
+        let vlan = choice.addresses.iter().position(|a| a == "192.0.2.20");
         assert!(vlan < wireguard, "{:?}", choice.addresses);
     }
 
@@ -230,8 +230,8 @@ mod tests {
         let AddressSource::Ambiguous(interfaces) = &choice.source else {
             panic!("expected an ambiguous choice, got {:?}", choice.source);
         };
-        assert!(interfaces.contains(&"vlan20".to_string()), "{interfaces:?}");
-        assert!(interfaces.contains(&"vlan10".to_string()), "{interfaces:?}");
+        assert!(interfaces.contains(&"vlan102".to_string()), "{interfaces:?}");
+        assert!(interfaces.contains(&"vlan101".to_string()), "{interfaces:?}");
 
         let warning = choice.warning().expect("a warning");
         assert!(warning.contains("[agent] interface"), "{warning}");
@@ -240,35 +240,38 @@ mod tests {
     #[test]
     fn naming_the_interface_settles_it() {
         let mut config = config();
-        config.interface = Some("vlan20".into());
+        config.interface = Some("vlan102".into());
 
         let choice = choose(&multi_vlan_host(), &config);
-        assert_eq!(choice.primary(), Some("192.168.20.2"));
-        assert_eq!(choice.source, AddressSource::Interface("vlan20".into()));
+        assert_eq!(choice.primary(), Some("192.0.2.20"));
+        assert_eq!(choice.source, AddressSource::Interface("vlan102".into()));
         assert!(choice.warning().is_none());
     }
 
     #[test]
     fn a_named_interface_with_no_address_reports_nothing_rather_than_the_wrong_thing() {
-        // eno8303 carries only a link-local address. Falling back to vlan10
+        // eno1 carries only a link-local address. Falling back to vlan101
         // would aim every peer at a network the operator did not choose, which
         // is the fault this setting exists to prevent.
         let mut config = config();
-        config.interface = Some("eno8303".into());
+        config.interface = Some("eno1".into());
 
         let choice = choose(&multi_vlan_host(), &config);
         assert!(choice.addresses.is_empty(), "{:?}", choice.addresses);
 
         let warning = choice.warning().expect("a warning");
-        assert!(warning.contains("eno8303"), "{warning}");
-        assert!(warning.contains("vlan20"), "it should list the real options: {warning}");
+        assert!(warning.contains("eno1"), "{warning}");
+        assert!(
+            warning.contains("vlan102"),
+            "it should list the real options: {warning}"
+        );
     }
 
     #[test]
     fn an_explicit_address_wins_over_everything() {
         let mut config = config();
         config.address = Some("203.0.113.7".into());
-        config.interface = Some("vlan10".into());
+        config.interface = Some("vlan101".into());
 
         let choice = choose(&multi_vlan_host(), &config);
         assert_eq!(choice.primary(), Some("203.0.113.7"));

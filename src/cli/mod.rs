@@ -129,6 +129,9 @@ pub enum Command {
         /// Do not generate a cluster credential on the controller.
         #[arg(long)]
         no_credential: bool,
+        /// Path the systemd unit should run, if not this binary's own.
+        #[arg(long)]
+        binary: Option<PathBuf>,
     },
     /// Delete records that have outlived their retention period.
     Prune {
@@ -262,11 +265,13 @@ pub async fn run(cli: Cli) -> anyhow::Result<i32> {
             dry_run,
             force,
             no_credential,
+            binary,
         } => install_cmd::run(
             role,
             output_dir,
             &cli.config,
             install_cmd::Options {
+                binary: binary.as_deref(),
                 dry_run: *dry_run,
                 force: *force,
                 credential: !*no_credential,

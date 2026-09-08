@@ -4,3 +4,6 @@
 *.db-wal
 *.db-shm
 /dev/compose/.state
+# Site-specific host names, checked by tests/deployment_data_stays_out_of_core.rs.
+# One per line. Never committed.
+tests/deployment-names.txt

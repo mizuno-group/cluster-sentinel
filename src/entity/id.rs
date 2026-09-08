@@ -96,9 +96,12 @@ mod tests {
 
     #[test]
     fn derivation_is_deterministic_across_processes() {
-        let key = EntityKey::new("mizuno-lab", EntityType::Host, "node01");
-        // Golden value: changing it would silently orphan every existing row.
-        assert_eq!(key.entity_id().to_string(), "dca02bc9-6285-5999-88ce-93cc2b0b1e3a");
+        // The *derivation* is what must never change: an id is computed from
+        // the key, so altering how would silently orphan every existing row.
+        // The environment name here is only an example, and this golden value
+        // moves with it -- what it pins is the algorithm, not this name.
+        let key = EntityKey::new("example-lab", EntityType::Host, "node01");
+        assert_eq!(key.entity_id().to_string(), "13c270fd-2a94-5b08-9e4f-34e1aa8ecdfa");
     }
 
     #[test]

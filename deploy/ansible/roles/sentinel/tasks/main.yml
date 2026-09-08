@@ -1,0 +1,159 @@
+---
+# Fail early and by name. A playbook that runs to completion against thirteen
+# nodes and leaves them all misconfigured costs more than one that refuses to
+# start.
+- name: The required variables are set
+  ansible.builtin.assert:
+    that:
+      - sentinel_environment | length > 0
+      - "'CHANGE-ME' not in sentinel_environment"
+      - sentinel_controller_address | length > 0
+      - "'CHANGE-ME' not in sentinel_controller_address"
+    fail_msg: >-
+      sentinel_environment と sentinel_controller_address を設定してください
+      (inventory.ini の [agents:vars])
+
+- name: Warn when no interface is named
+  ansible.builtin.debug:
+    msg: >-
+      sentinel_interface が未設定です。NIC が複数ある host では、agent が
+      どの NIC でクラスタ内通信をしているか判別できません。展開後に
+      `sentinel doctor` を確認し、警告が出ていれば設定してください。
+  when: sentinel_interface | length == 0 or 'CHANGE-ME' in sentinel_interface
+
+# The release carries one binary per architecture, and a cluster that has
+# grown over time has both.
+- name: Work out which release artefact this host needs
+  ansible.builtin.set_fact:
+    sentinel_artefact: >-
+      sentinel-{{ 'x86_64' if ansible_architecture == 'x86_64' else 'aarch64' }}-unknown-linux-musl
+
+- name: This architecture is one we publish
+  ansible.builtin.assert:
+    that: ansible_architecture in ['x86_64', 'aarch64']
+    fail_msg: "unsupported architecture: {{ ansible_architecture }}"
+
+- name: What is installed already, if anything
+  ansible.builtin.command: "{{ sentinel_binary_path }} version"
+  register: sentinel_installed
+  changed_when: false
+  failed_when: false
+
+- name: Fetch the release binary
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/{{ sentinel_repo }}/releases/download/{{ sentinel_version }}/{{ sentinel_artefact }}
+    dest: "{{ sentinel_download_dir }}/{{ sentinel_artefact }}"
+    mode: "0755"
+  when: sentinel_version not in (sentinel_installed.stdout | default(''))
+  register: sentinel_download
+
+- name: Fetch its checksum
+  ansible.builtin.get_url:
+    url: >-
+      https://github.com/{{ sentinel_repo }}/releases/download/{{ sentinel_version }}/{{ sentinel_artefact }}.sha256
+    dest: "{{ sentinel_download_dir }}/{{ sentinel_artefact }}.sha256"
+    mode: "0644"
+  when: sentinel_download.changed
+
+# Downloading over TLS says the file came from GitHub. The checksum says it is
+# the file GitHub built, which is the claim that matters.
+- name: The download matches its checksum
+  ansible.builtin.command:
+    cmd: "sha256sum -c {{ sentinel_artefact }}.sha256"
+    chdir: "{{ sentinel_download_dir }}"
+  when: sentinel_download.changed
+  changed_when: false
+
+- name: Install the binary
+  ansible.builtin.copy:
+    src: "{{ sentinel_download_dir }}/{{ sentinel_artefact }}"
+    dest: "{{ sentinel_binary_path }}"
+    remote_src: true
+    mode: "0755"
+    owner: root
+    group: root
+  when: sentinel_download.changed
+  notify: Restart sentinel-agent
+
+- name: Remove the downloaded files
+  ansible.builtin.file:
+    path: "{{ sentinel_download_dir }}/{{ item }}"
+    state: absent
+  loop:
+    - "{{ sentinel_artefact }}"
+    - "{{ sentinel_artefact }}.sha256"
+
+# Before `install`, so the files it writes can be handed straight over.
+- name: The service user exists
+  ansible.builtin.user:
+    name: "{{ sentinel_user }}"
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+
+# `install` creates /etc/sentinel and writes a unit and a configuration. It
+# never overwrites, so running this playbook again is safe: a node whose
+# configuration was tuned by hand keeps it.
+- name: Generate the unit and a default configuration
+  ansible.builtin.command:
+    cmd: "{{ sentinel_binary_path }} install agent --binary {{ sentinel_binary_path }}"
+    creates: /etc/systemd/system/sentinel-agent.service
+
+- name: The cluster credential is in place
+  ansible.builtin.copy:
+    src: "{{ sentinel_token_source }}"
+    dest: "{{ sentinel_config_dir }}/token"
+    owner: "{{ sentinel_user }}"
+    group: "{{ sentinel_user }}"
+    mode: "0400"
+  notify: Restart sentinel-agent
+
+# Written from a template rather than edited in place, so a node's
+# configuration is whatever the inventory says and nothing else.
+- name: The configuration says what the inventory says
+  ansible.builtin.template:
+    src: config.toml.j2
+    dest: "{{ sentinel_config_dir }}/config.toml"
+    owner: "{{ sentinel_user }}"
+    group: "{{ sentinel_user }}"
+    mode: "0640"
+  notify: Restart sentinel-agent
+
+- name: Everything under /etc/sentinel belongs to the service user
+  ansible.builtin.file:
+    path: "{{ sentinel_config_dir }}"
+    state: directory
+    owner: "{{ sentinel_user }}"
+    group: "{{ sentinel_user }}"
+    mode: "0750"
+    recurse: true
+
+# Before starting, not after. A node that fails to start because of a typo is
+# worth catching here, where the message names the setting.
+- name: The configuration is valid
+  ansible.builtin.command: "{{ sentinel_binary_path }} --config {{ sentinel_config_dir }}/config.toml config check"
+  become_user: "{{ sentinel_user }}"
+  changed_when: false
+
+- name: The agent is running and enabled
+  ansible.builtin.systemd:
+    name: sentinel-agent
+    state: started
+    enabled: true
+    daemon_reload: true
+
+# The address is the one thing this role cannot get right on its own, so it is
+# reported rather than assumed.
+- name: What this host will report itself as
+  ansible.builtin.command: "{{ sentinel_binary_path }} --config {{ sentinel_config_dir }}/config.toml doctor --json"
+  become_user: "{{ sentinel_user }}"
+  register: sentinel_doctor
+  changed_when: false
+
+- name: The reported address, and any warning about it
+  ansible.builtin.debug:
+    msg: >-
+      {{ (sentinel_doctor.stdout | from_json).address_reported | default('(none)') }}
+      {{ '— ' ~ (sentinel_doctor.stdout | from_json).address_warning
+         if (sentinel_doctor.stdout | from_json).address_warning else '' }}

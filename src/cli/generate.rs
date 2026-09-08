@@ -49,8 +49,33 @@ fn duration(value: Duration) -> String {
     crate::time::format_duration(value)
 }
 
-/// Render a complete configuration file for `role`.
+/// What was found on the host the file is being generated for.
+///
+/// Only facts about *this* machine, established the same way `doctor`
+/// establishes them. It saves an operator from a file that says
+/// `enabled = false` on a Slurm controller and then reports an empty cluster.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Detected {
+    /// Whether `scontrol` is on this host's `PATH`.
+    pub slurm: bool,
+}
+
+impl Detected {
+    /// Inspect the running host.
+    pub fn on_this_host(inspector: &dyn crate::agent::system::SystemInspector) -> Self {
+        Self {
+            slurm: inspector.which("scontrol").is_some(),
+        }
+    }
+}
+
+/// Render a complete configuration file for `role`, detecting nothing.
 pub fn config_file(role: Role) -> String {
+    config_file_for(role, Detected::default())
+}
+
+/// Render a complete configuration file for `role`.
+pub fn config_file_for(role: Role, detected: Detected) -> String {
     let defaults = Config::default();
     let mut out = String::new();
 
@@ -64,7 +89,7 @@ pub fn config_file(role: Role) -> String {
     ));
 
     match role {
-        Role::Controller => out.push_str(&controller_section(&defaults)),
+        Role::Controller => out.push_str(&controller_section(&defaults, detected)),
         Role::Agent => out.push_str(&agent_section(&defaults)),
     }
 
@@ -106,8 +131,21 @@ fn header(role: Role) -> String {
     )
 }
 
-fn controller_section(defaults: &Config) -> String {
+fn controller_section(defaults: &Config, detected: Detected) -> String {
     let c = &defaults.controller;
+    let (slurm, slurm_note) = if detected.slurm {
+        (
+            true,
+            "# この host に scontrol があったため true にしてあります。\n\
+             # Slurm クラスタでない場合は false にしてください。",
+        )
+    } else {
+        (
+            false,
+            "# この host に scontrol が見つからなかったため false です。\n\
+             # Slurm クラスタなら true にしてください（node 一覧と状態を取り込みます）。",
+        )
+    };
     format!(
         "\n\
 # ===========================================================================
@@ -138,7 +176,7 @@ path = \"{db}\"
 degree = {degree}
 
 [discovery.slurm]
-# Slurm クラスタなら true。node 一覧と状態を scontrol から取り込みます。
+{slurm_note}
 enabled = {slurm}
 # scontrol が PATH にない場合のみ指定。
 # scontrol_path = \"/opt/slurm/bin/scontrol\"
@@ -149,7 +187,8 @@ enabled = {slurm}
         observe = c.observe,
         db = defaults.database.path.display(),
         degree = defaults.peer_monitoring.degree,
-        slurm = defaults.discovery.slurm.enabled,
+        slurm = slurm,
+        slurm_note = slurm_note,
     )
 }
 
@@ -187,10 +226,10 @@ roles = []
 # 曖昧な場合はその旨を表示します。
 # ---------------------------------------------------------------------------
 # NIC 名で指定（fleet 全体で同じ 1 行が使えるので推奨）
-# interface = \"vlan20\"
+# interface = \"vlan102\"
 #
 # アドレスを直接指定（NAT 越しなど、host 自身から見えない場合）
-# address = \"192.168.20.2\"
+# address = \"192.0.2.20\"
 
 # SSH が 22 以外で、かつ /etc/ssh/sshd_config から読めない場合のみ指定。
 # 通常は agent が sshd_config から自動検出します。
@@ -518,6 +557,26 @@ mod tests {
         let text = config_file(Role::Agent);
         assert!(!text.contains("[retention]"), "{text}");
         assert!(!text.contains("[database]"));
+    }
+
+    #[test]
+    fn slurm_discovery_is_turned_on_where_slurm_is_installed() {
+        // A generated file that says `enabled = false` on a Slurm controller
+        // produces an empty cluster and no explanation for it.
+        let text = config_file_for(Role::Controller, Detected { slurm: true });
+        assert!(text.contains("enabled = true"), "{text}");
+
+        let config = Config::from_toml(&text, Path::new("generated.toml")).expect("parses");
+        assert!(config.discovery.slurm.enabled);
+    }
+
+    #[test]
+    fn slurm_discovery_is_left_off_where_slurm_is_not_installed() {
+        let text = config_file_for(Role::Controller, Detected { slurm: false });
+        let config = Config::from_toml(&text, Path::new("generated.toml")).expect("parses");
+        assert!(!config.discovery.slurm.enabled);
+        // And says why, so the setting does not look arbitrary.
+        assert!(text.contains("scontrol"), "{text}");
     }
 
     #[test]

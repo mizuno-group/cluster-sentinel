@@ -3,7 +3,7 @@
 
 **Version:** 0.3  
 **Status:** Architecture Specification  
-**Initial production target:** `mizuno_cluster` および関連インフラ  
+**Initial production target:** `example_cluster` および関連インフラ  
 **Primary implementation language:** Rust  
 **Deployment model:** Single executable binary per architecture  
 **Initial platform:** Linux / systemd / Slurm / NFS  
@@ -145,13 +145,13 @@ Environment
 例:
 
 ```text
-mizuno-lab
+example-lab
 ```
 
 将来的に、
 
 ```text
-mizuno-lab
+example-lab
 ├── production-cluster
 ├── test-cluster
 └── workstation-group
@@ -169,7 +169,7 @@ ClusterはManagedEntityの集合を論理的にグループ化する。
 
 ```text
 Cluster:
-mizuno_cluster
+example_cluster
 ```
 
 ただしClusterとSlurm Clusterを同義にしてはならない。
@@ -228,11 +228,11 @@ NetworkDevice等は将来追加可能。
 例:
 
 ```text
-parent
-andre01
-david01
-david02
-creator2
+head01
+node01
+node08
+node09
+node02
 ...
 filesrv01
 filesrv02
@@ -259,10 +259,10 @@ Host上で動くサービスを独立entityとして扱う。
 例:
 
 ```text
-slurmctld@parent
-slurmdbd@parent
-slurmd@david02
-sshd@david02
+slurmctld@head01
+slurmdbd@head01
+slurmd@node09
+sshd@node09
 nfs-server@filesrv01
 ```
 
@@ -309,19 +309,19 @@ Scheduler/control planeも独立entityとする。
 現在:
 
 ```text
-Slurm scheduler: mizuno_cluster
+Slurm scheduler: example_cluster
 ```
 
-Host `parent` とSchedulerそのものを区別する。
+Host `head01` とSchedulerそのものを区別する。
 
 例:
 
 ```text
-Host(parent)
+Host(head01)
     ↓ hosts
 Service(slurmctld)
     ↓ provides
-Scheduler(mizuno_cluster)
+Scheduler(example_cluster)
 ```
 
 ---
@@ -435,10 +435,10 @@ journal
 observer.peer
 ```
 
-`david02`:
+`node09`:
 
 ```text
-Host(david02)
+Host(node09)
 
 Capabilities:
 host.metrics
@@ -509,13 +509,13 @@ force
 Initial environment:
 
 ```text
-mizuno-lab
+example-lab
 ```
 
 Initial cluster:
 
 ```text
-mizuno_cluster
+example_cluster
 ```
 
 ---
@@ -525,29 +525,29 @@ mizuno_cluster
 Slurm controller:
 
 ```text
-parent
+head01
 ```
 
 Slurm compute:
 
 ```text
-creator2
-creator3
-creator4
-creator5
-creator6
-creator7
+node02
+node03
+node04
+node05
+node06
+node07
 
-andre01
+node01
 
-david01
-david02
+node08
+node09
 
-grace01
-grace02
+node10
+node11
 
-preproc01
-hiegm5
+node12
+node13
 ```
 
 Non-Slurm infrastructure:
@@ -564,14 +564,14 @@ filesrv02
 # 22. Current Slurm Configuration Characteristics
 
 ```text
-SlurmctldHost=parent
+SlurmctldHost=head01
 
 SlurmctldPort=6817
 SlurmdPort=6818
 
 ReturnToService=1
 
-AccountingStorageHost=parent
+AccountingStorageHost=head01
 
 SelectType=select/cons_tres
 SelectTypeParameters=CR_Core_Memory
@@ -588,21 +588,21 @@ SentinelはSlurm configurationを変更しない。
 filesrv01:
 
 ```text
-creator2
-creator3
-creator4
-hiegm5
-grace02
+node02
+node03
+node04
+node13
+node11
 ```
 
 filesrv02:
 
 ```text
-creator5
-creator6
-creator7
-preproc01
-grace01
+node05
+node06
+node07
+node12
+node10
 ```
 
 この関係はcurrent deployment dataとして扱い、core architectureには埋め込まない。
@@ -645,7 +645,7 @@ A → B
 例:
 
 ```text
-creator2
+node02
     → filesrv01-backed-storage
 ```
 
@@ -936,12 +936,12 @@ sentinel-linux-aarch64
 
 # 42. Controller Location
 
-Controllerを `parent` にハードコードしてはならない。
+Controllerを `head01` にハードコードしてはならない。
 
 現在:
 
 ```text
-parent
+head01
 ```
 
 はdeployment configuration上のcontrollerに過ぎない。
@@ -997,7 +997,7 @@ controller communication
 現在推奨:
 
 ```text
-parent
+head01
 filesrv01
 filesrv02
 compute nodes
@@ -1041,11 +1041,11 @@ independent infrastructure observer
 
 # 49. Example
 
-creator2:
+node02:
 
 ```text
-creator3   → same filesrv01 domain
-creator5   → different storage domain
+node03   → same filesrv01 domain
+node05   → different storage domain
 filesrv02  → infrastructure observer
 ```
 
@@ -1058,9 +1058,9 @@ filesrv02  → infrastructure observer
 例:
 
 ```text
-parent → david02 FAIL
-creator5 → david02 OK
-filesrv01 → david02 OK
+head01 → node09 FAIL
+node05 → node09 OK
+filesrv01 → node09 OK
 ```
 
 なら、
@@ -1078,9 +1078,9 @@ PATH_SPECIFIC_NETWORK_FAILURE
 独立observer複数から失敗:
 
 ```text
-parent → david02 FAIL
-creator5 → david02 FAIL
-filesrv01 → david02 FAIL
+head01 → node09 FAIL
+node05 → node09 FAIL
+filesrv01 → node09 FAIL
 ```
 
 なら、
@@ -1352,7 +1352,7 @@ deployment simplicity
 
 ```text
 Scheduler:
-mizuno_cluster
+example_cluster
 ```
 
 状態:
@@ -1808,11 +1808,11 @@ LLMを必須にしない。
 例:
 
 ```text
-creator2
-creator3
-creator4
-hiegm5
-grace02
+node02
+node03
+node04
+node13
+node11
 ```
 
 でstorage障害が同時発生。
@@ -1838,7 +1838,7 @@ confidence HIGH
 
 filesrv01正常。
 
-creator2のみ異常。
+node02のみ異常。
 
 ↓
 
@@ -2090,7 +2090,7 @@ mount/remount
 ```text
 systemctl status slurmd
 journalctl -u slurmd
-scontrol show node david02
+scontrol show node node09
 ```
 
 ---
@@ -2314,10 +2314,10 @@ configuration
 
 ```toml
 config_version = 1
-environment = "mizuno-lab"
+environment = "example-lab"
 
 [controller]
-address = "parent:7443"
+address = "head01:7443"
 ```
 
 Roleすらauto/manual hybridにできる。
@@ -2329,7 +2329,7 @@ Roleすらauto/manual hybridにできる。
 ```toml
 config_version = 1
 
-environment = "mizuno-lab"
+environment = "example-lab"
 
 [controller]
 listen = "0.0.0.0:7443"
@@ -2386,7 +2386,7 @@ sudo install -m 0755 sentinel /usr/local/bin/sentinel
 Agent:
 
 ```bash
-sudo sentinel install agent --controller parent:7443
+sudo sentinel install agent --controller head01:7443
 ```
 
 Controller:
@@ -2434,20 +2434,20 @@ sentinel version
 例:
 
 ```text
-ENVIRONMENT: mizuno-lab
+ENVIRONMENT: example-lab
 
 Infrastructure
 ────────────────────────────
-parent       HEALTHY
+head01       HEALTHY
 filesrv01    HEALTHY
 filesrv02    DEGRADED
 
 Compute
 ────────────────────────────
-creator2     HEALTHY
-creator3     HEALTHY
+node02     HEALTHY
+node03     HEALTHY
 ...
-david02      DEGRADED
+node09      DEGRADED
 ```
 
 ---
@@ -2456,7 +2456,7 @@ david02      DEGRADED
 
 ```text
 Entity:
-Host(david02)
+Host(node09)
 
 Capabilities:
 host.metrics
@@ -2477,9 +2477,9 @@ SCHEDULER_DEGRADED
 # 139. Dependency View
 
 ```text
-creator2
+node02
    │
-   ├── uses_scheduler → mizuno_cluster
+   ├── uses_scheduler → example_cluster
    │
    └── uses_storage → filesrv01-storage
                           │
@@ -2522,7 +2522,7 @@ Entity metadata/capabilityでrenderする。
 # 142. Current Production Deployment
 
 ```text
-parent
+head01
   Host
   controller-related capabilities
   observer
@@ -2551,21 +2551,21 @@ filesrv02
 概念:
 
 ```text
-creator2 ─┐
-creator3 ─┤
-creator4 ─┼──→ filesrv01-storage → filesrv01
-hiegm5   ─┤
-grace02  ─┘
+node02 ─┐
+node03 ─┤
+node04 ─┼──→ filesrv01-storage → filesrv01
+node13   ─┤
+node11  ─┘
 
 
-creator5 ─┐
-creator6 ─┤
-creator7 ─┼──→ filesrv02-storage → filesrv02
-preproc01─┤
-grace01  ─┘
+node05 ─┐
+node06 ─┤
+node07 ─┼──→ filesrv02-storage → filesrv02
+node12─┤
+node10  ─┘
 ```
 
-andre01/david01/david02のstorage dependencyはruntime discoveryまたはconfigから登録する。
+node01/node08/node09のstorage dependencyはruntime discoveryまたはconfigから登録する。
 
 ---
 
@@ -2574,7 +2574,7 @@ andre01/david01/david02のstorage dependencyはruntime discoveryまたはconfig�
 現在:
 
 ```text
-parent
+head01
 ```
 
 将来:
@@ -2718,10 +2718,10 @@ Redfish integration追加のみ。
 # 151. Future Scenario: Multi-cluster
 
 ```text
-Environment: mizuno-lab
+Environment: example-lab
 
 Cluster:
-mizuno_cluster
+example_cluster
 cluster2
 test_cluster
 ```
@@ -2790,7 +2790,7 @@ Unknown Slurm fieldsやversion差でparser全体が失敗しないこと。
 Controller + Slurm discovery。
 
 ```text
-parent only
+head01 only
 ```
 
 ---
@@ -2800,8 +2800,8 @@ parent only
 Agent framework。
 
 ```text
-david02
-creator2
+node09
+node02
 ```
 
 ---
@@ -2988,7 +2988,7 @@ filesrv01依存node群の同時異常をshared dependency incidentへ相関。
 
 # 175. Acceptance: Path Failure
 
-parentからのみhost unreachableならhost downと断定しない。
+head01からのみhost unreachableならhost downと断定しない。
 
 ---
 
@@ -3150,7 +3150,7 @@ CoreがSlurm/NFS implementationへ逆依存してはならない。
 
 本プロジェクトを実装する際、
 
-**現在のmizuno_clusterの具体的構成に最適化しすぎてcore architectureを固定化してはならない。**
+**現在のexample_clusterの具体的構成に最適化しすぎてcore architectureを固定化してはならない。**
 
 現在のhost名、partition名、fileserver構成は、
 
@@ -3190,7 +3190,7 @@ tests
 
 ・-o/-i partition namingにcore logicを依存させる
 
-・parentをcontrollerとしてsource codeへ埋め込む
+・controller の host 名を source code へ埋め込む
 
 ・1 controllerしか存在できないDB schemaにする
 
@@ -3315,4 +3315,4 @@ Cluster Sentinelは、
 
 として実装する。
 
-`mizuno_cluster` は最初のproduction targetであるが、Sentinel coreの設計を `mizuno_cluster` 固有のtopology、Slurm partition、host naming、NFS構成へ依存させてはならない。
+`example_cluster` は最初のproduction targetであるが、Sentinel coreの設計を `example_cluster` 固有のtopology、Slurm partition、host naming、NFS構成へ依存させてはならない。

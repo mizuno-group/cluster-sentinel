@@ -52,7 +52,7 @@ config_version = 1
 
 ```toml
 config_version = 1
-environment = "mizuno-lab"
+environment = "example-lab"
 
 [agent]
 controller_address = "controller.example:7443"
@@ -65,7 +65,7 @@ controller address に既定値はありません。
 
 ```toml
 config_version = 1
-environment = "mizuno-lab"
+environment = "example-lab"
 
 [controller]
 listen = "0.0.0.0:7443"
@@ -138,20 +138,20 @@ peer がこの host を probe するアドレスは、次の順で決まりま�
 
 **自動検出は「どの NIC がクラスタ内通信を担っているか」を答えられません。**
 それは host の性質ではなく site の事実です。
-`vlan10` / `vlan20` / `vlan32` を持つ host では、どれも同じくらい妥当に見えます。
+`vlan101` / `vlan102` / `vlan103` を持つ host では、どれも同じくらい妥当に見えます。
 
 そのため、**物理 NIC の候補が 2 つ以上ある場合は「曖昧である」と報告します。**
 黙って 1 つ選ぶと、間違っていても気づけないためです。
 `sentinel doctor` が候補一覧とともに表示します。
 
 ```
-Address:     192.168.10.2
-  -> vlan10           192.168.10.2
-     vlan20           192.168.20.2
-     vlan32           192.168.32.2
+Address:     192.0.2.10
+  -> vlan101           192.0.2.10
+     vlan102           192.0.2.20
+     vlan103           192.0.2.32
      wg0              10.0.0.1
   ! several interfaces could be the one peers reach this host on
-    (vlan10, vlan20, vlan32); 192.168.10.2 was chosen by name order.
+    (vlan101, vlan102, vlan103); 192.0.2.10 was chosen by name order.
     Set [agent] interface to say which.
 ```
 

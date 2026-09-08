@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 
 use crate::capability::well_known;
+use crate::entity::EntityType;
 use crate::observation::{Observation, ProbeStatus};
 use crate::probes::{ExecutionMode, Probe, ProbeContext, ProbeDefinition};
 
@@ -156,9 +157,24 @@ impl TcpProbe {
     /// `sshd` marked the network unreachable, which then makes it impossible to
     /// tell a service failure from a dead host — the single distinction this
     /// system exists to make.
+    ///
+    /// **This probe requires no capability**, unlike every other one. Opening a
+    /// TCP connection needs nothing installed on the far end; it needs an
+    /// address, which the caller has already found or it would not be asking.
+    /// Gating it behind a capability would mean a host only gets checked once
+    /// something on it reports that it can be checked — so a cluster whose
+    /// nodes come from Slurm discovery, with no agent yet, would be listed as
+    /// healthy without anyone ever having contacted it. Capabilities gate
+    /// probes that need something *present* (`nvidia-smi`, `journalctl`, an
+    /// NFS export). Reachability is not one of them.
     pub fn reachability() -> Self {
         Self {
             refusal_is_reachable: true,
+            definition: ProbeDefinition::new(PROBE_ID)
+                .targeting([EntityType::Host])
+                .every(Duration::from_secs(5))
+                .within(Duration::from_secs(3))
+                .mode(ExecutionMode::Either),
             ..Self::new(PROBE_ID, 22)
         }
     }

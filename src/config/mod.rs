@@ -52,6 +52,22 @@ pub enum ConfigError {
         #[source]
         source: std::io::Error,
     },
+    /// The file exists but this user may not read it.
+    ///
+    /// Separate from [`ConfigError::Read`] because "permission denied" on its
+    /// own sends people to `chmod`, and the answer is to run as the user the
+    /// configuration belongs to. The file is deliberately not world-readable:
+    /// webhook URLs in it can carry their own credentials.
+    #[error(
+        "cannot read config file {path}: permission denied.\n\
+         The configuration belongs to the service user, so run one of:\n\
+        \x20 sudo -u sentinel sentinel <command>\n\
+        \x20 sudo sentinel <command>"
+    )]
+    Forbidden {
+        /// The path that could not be read.
+        path: PathBuf,
+    },
     /// The file is not valid TOML, or does not match the schema.
     #[error("invalid config file {path}: {source}")]
     Parse {
@@ -180,9 +196,14 @@ impl Config {
 
     /// Load a configuration from disk.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
-            path: path.to_path_buf(),
-            source,
+        let text = std::fs::read_to_string(path).map_err(|source| match source.kind() {
+            std::io::ErrorKind::PermissionDenied => ConfigError::Forbidden {
+                path: path.to_path_buf(),
+            },
+            _ => ConfigError::Read {
+                path: path.to_path_buf(),
+                source,
+            },
         })?;
         Self::from_toml(&text, path)
     }
@@ -479,14 +500,14 @@ mod tests {
         let config = parse(
             r#"
             config_version = 1
-            environment = "mizuno-lab"
+            environment = "example-lab"
 
             [agent]
             controller_address = "controller.example:7443"
             "#,
         )
         .expect("parse");
-        assert_eq!(config.environment, "mizuno-lab");
+        assert_eq!(config.environment, "example-lab");
         assert_eq!(
             config.agent.controller_address.as_deref(),
             Some("controller.example:7443")

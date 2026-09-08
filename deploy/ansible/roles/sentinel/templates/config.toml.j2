@@ -1,0 +1,25 @@
+# Cluster Sentinel — agent
+#
+# Ansible が管理しています。手で編集しても次回の実行で上書きされます。
+# 変更は deploy/ansible/inventory.ini に書いてください。
+
+config_version = 1
+environment = "{{ sentinel_environment }}"
+
+[agent]
+controller_address = "{{ sentinel_controller_address }}"
+spool_path = "/var/lib/sentinel/spool.db"
+listen = "0.0.0.0:7444"
+roles = {{ sentinel_roles | to_json }}
+{% if sentinel_interface | length > 0 and 'CHANGE-ME' not in sentinel_interface %}
+
+# peer がこの host に到達する NIC。自動検出では site の事実を答えられません。
+interface = "{{ sentinel_interface }}"
+{% endif %}
+{% if sentinel_observer %}
+
+# この host は peer observer です。
+# observer は互いに異なる障害ドメインから選ぶこと。
+[capabilities]
+"observer.peer" = "force"
+{% endif %}

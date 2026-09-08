@@ -1,0 +1,6 @@
+---
+- name: Restart sentinel-agent
+  ansible.builtin.systemd:
+    name: sentinel-agent
+    state: restarted
+    daemon_reload: true

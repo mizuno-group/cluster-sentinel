@@ -767,7 +767,7 @@ VM testbedを日常的な主開発環境にすることは必須ではない。
 
 # 31. Real Cluster Validation
 
-`mizuno_cluster` は開発環境ではなく、
+`example_cluster` は開発環境ではなく、
 
 ```text
 staging / production validation environment
@@ -903,7 +903,7 @@ thiserror
 │
 ├── fixtures/
 │   ├── slurm/
-│   └── mizuno_cluster/
+│   └── example_cluster/
 │
 ├── tests/
 │   ├── integration/
@@ -1741,7 +1741,7 @@ INVALID_REG
 現在の実構成は、
 
 ```text
-fixtures/mizuno_cluster/
+fixtures/example_cluster/
 ```
 
 へtest fixtureとして保存してよい。
@@ -2431,18 +2431,18 @@ AuthenticationProvider
 以下はcore source codeへ埋め込まない。
 
 ```text
-parent
+head01
 filesrv01
 filesrv02
 
-creator2-7
-andre01
-david01
-david02
-grace01
-grace02
-preproc01
-hiegm5
+node02-7
+node01
+node08
+node09
+node10
+node11
+node12
+node13
 
 current Slurm partitions
 current NFS topology

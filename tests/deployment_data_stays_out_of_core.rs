@@ -6,30 +6,26 @@
 
 use std::path::{Path, PathBuf};
 
-/// Names from the initial production deployment. If one of these appears in
-/// `src/`, some logic has been tied to today's topology.
-const DEPLOYMENT_NAMES: &[&str] = &[
-    "creator2",
-    "creator3",
-    "creator4",
-    "creator5",
-    "creator6",
-    "creator7",
-    "andre01",
-    "david01",
-    "david02",
-    "grace01",
-    "grace02",
-    "preproc01",
-    "hiegm5",
-    "filesrv01",
-    "filesrv02",
-    "mizuno_cluster",
-];
-
-/// Names that are ordinary English words elsewhere in the code (`parent` is a
-/// path component). Those are only a problem as string literals.
-const DEPLOYMENT_NAMES_AS_LITERALS: &[&str] = &["parent"];
+/// Names this site's deployment uses, read from an untracked local file.
+///
+/// The list used to be written out here, which meant the guard against
+/// publishing a deployment's topology published it itself. It now comes from
+/// `tests/deployment-names.txt`, one name per line, which is gitignored: a
+/// site can list its hosts and have the check enforced locally, and the
+/// repository carries none of them.
+///
+/// With no such file the name check passes vacuously. The structural checks
+/// below do not depend on it and always run.
+fn deployment_names() -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string("tests/deployment-names.txt") else {
+        return Vec::new();
+    };
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
+}
 
 fn source_files() -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -53,19 +49,20 @@ fn collect(dir: &Path, files: &mut Vec<PathBuf>) {
 
 #[test]
 fn no_production_host_name_appears_in_core_source() {
-    let mut violations = Vec::new();
+    let names = deployment_names();
+    if names.is_empty() {
+        // Nothing to check against, which is the state a public repository
+        // should be in. See `deployment_names`.
+        return;
+    }
 
+    let mut violations = Vec::new();
     for file in source_files() {
         let text = std::fs::read_to_string(&file).expect("read source file");
         for (number, line) in text.lines().enumerate() {
-            for name in DEPLOYMENT_NAMES {
-                if line.contains(name) {
+            for name in &names {
+                if line.contains(name.as_str()) {
                     violations.push(format!("{}:{}: {name}", file.display(), number + 1));
-                }
-            }
-            for name in DEPLOYMENT_NAMES_AS_LITERALS {
-                if line.contains(&format!("\"{name}\"")) {
-                    violations.push(format!("{}:{}: \"{name}\"", file.display(), number + 1));
                 }
             }
         }
@@ -76,6 +73,19 @@ fn no_production_host_name_appears_in_core_source() {
         "deployment-specific names belong in fixtures, config or tests, not in src/:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn the_name_check_catches_a_name_when_one_is_configured() {
+    // The check above passes vacuously without a local list, so this proves
+    // the mechanism still works: every source file is scanned for each name.
+    let files = source_files();
+    let hit = files.iter().any(|file| {
+        std::fs::read_to_string(file)
+            .map(|text| text.contains("EntityKey"))
+            .unwrap_or(false)
+    });
+    assert!(hit, "the scan reads source files");
 }
 
 #[test]

@@ -59,7 +59,7 @@ fn unit(description: &str, exec_start: &str, writable: &[&str], token: &Path) ->
         "\
 [Unit]
 Description={description}
-Documentation=https://github.com/mizuno-lab/cluster-sentinel
+Documentation=https://github.com/Lzh-Function/cluster-sentinel
 After=network-online.target
 Wants=network-online.target
 
@@ -96,6 +96,11 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
+
+# systemd creates this on first start, owned by the service user, so a host
+# that has only ever had the binary copied onto it needs no mkdir.
+StateDirectory=sentinel
+
 {}
 
 # Journald is the log destination (IMPLEMENTATION.md §59).
@@ -116,7 +121,13 @@ WantedBy=multi-user.target
 /// The shell commands an operator runs to finish the install.
 /// What `sentinel install` should do beyond writing the unit.
 #[derive(Debug, Clone, Copy)]
-pub struct Options {
+pub struct Options<'a> {
+    /// Where the unit should say the binary lives.
+    ///
+    /// Defaults to the running executable, which is right once the binary is
+    /// installed and wrong while it is still in a download directory -- the
+    /// unit would point at a path that will not exist tomorrow.
+    pub binary: Option<&'a Path>,
     /// Print everything instead of writing it.
     pub dry_run: bool,
     /// Overwrite files that already exist.
@@ -125,9 +136,10 @@ pub struct Options {
     pub credential: bool,
 }
 
-impl Default for Options {
+impl Default for Options<'_> {
     fn default() -> Self {
         Self {
+            binary: None,
             dry_run: false,
             force: false,
             credential: true,
@@ -295,23 +307,61 @@ pub fn setup_instructions(role: &str, written: &[Written], credential_generated:
     lines.join("\n")
 }
 
+/// Where an installed binary is expected to live.
+pub const DEFAULT_BINARY_PATH: &str = "/usr/local/bin/sentinel";
+
+/// Directories a binary can live in and still be there after a reboot.
+const DURABLE_BINARY_DIRECTORIES: &[&str] = &["/usr/local/bin", "/usr/bin", "/usr/sbin", "/opt", "/usr/local/sbin"];
+
+/// Warn if the unit would point somewhere the binary will not stay.
+///
+/// The likeliest first run is `./sentinel-x86_64-... install agent` from a
+/// download directory, which writes a unit naming a path in `/home` or `/tmp`.
+/// It starts once and fails after the directory is cleaned up, with an error
+/// that says nothing about why.
+fn transient_binary_warning(binary: &Path) -> Option<String> {
+    let durable = DURABLE_BINARY_DIRECTORIES.iter().any(|dir| binary.starts_with(dir));
+    if durable {
+        return None;
+    }
+    Some(format!(
+        "the unit will run {}, which is not a durable location. Install the \
+         binary first:\n  sudo install -m 0755 {} {DEFAULT_BINARY_PATH}\n\
+         then run this again, or pass --binary {DEFAULT_BINARY_PATH}.",
+        binary.display(),
+        binary.display()
+    ))
+}
+
 /// Run `sentinel install <role>`.
 ///
 /// Writes everything a host of this role needs: a complete configuration file
 /// with every setting at its default, a hardened systemd unit, and -- on a
 /// controller -- a generated cluster credential. Nothing that already exists is
 /// touched without `--force`, so running it twice is safe.
-pub fn run(role: &str, output_dir: &Path, config: &Path, options: Options) -> anyhow::Result<i32> {
+pub fn run(role: &str, output_dir: &Path, config: &Path, options: Options<'_>) -> anyhow::Result<i32> {
     let parsed = crate::cli::generate::Role::parse(role)
         .ok_or_else(|| anyhow::anyhow!("unknown role {role:?}; expected \"controller\" or \"agent\""))?;
-    let binary = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/local/bin/sentinel"));
+    let binary = match options.binary {
+        Some(path) => path.to_path_buf(),
+        None => std::env::current_exe().unwrap_or_else(|_| PathBuf::from(DEFAULT_BINARY_PATH)),
+    };
 
     let (unit_name, unit_contents) = match parsed {
         crate::cli::generate::Role::Controller => ("sentinel-controller.service", controller_unit(&binary, config)),
         crate::cli::generate::Role::Agent => ("sentinel-agent.service", agent_unit(&binary, config)),
     };
     let unit_path = output_dir.join(unit_name);
-    let config_contents = crate::cli::generate::config_file(parsed);
+    let config_contents = crate::cli::generate::config_file_for(
+        parsed,
+        crate::cli::generate::Detected::on_this_host(&crate::agent::system::LinuxInspector::new()),
+    );
+
+    // Before the dry-run return: a rehearsal is exactly when an operator wants
+    // to be told the unit would name a path that will not survive.
+    if let Some(warning) = transient_binary_warning(&binary) {
+        eprintln!("warning: {warning}\n");
+    }
 
     if options.dry_run {
         println!("# {}\n", unit_path.display());
@@ -462,6 +512,49 @@ mod tests {
             "monitoring that stays down helps nobody"
         );
         assert!(unit.contains("StandardOutput=journal"));
+    }
+
+    #[test]
+    fn systemd_creates_the_state_directory() {
+        // A host that has only ever had the binary copied onto it should not
+        // need a mkdir before the service will start.
+        assert!(controller().contains("StateDirectory=sentinel"));
+    }
+
+    #[test]
+    fn installing_from_a_download_directory_warns() {
+        // The likeliest first run: `./sentinel-x86_64-... install agent` in a
+        // home directory. The unit would name a path that stops existing.
+        let warning =
+            transient_binary_warning(Path::new("/home/li/sentinel-x86_64-unknown-linux-musl")).expect("a warning");
+        assert!(warning.contains(DEFAULT_BINARY_PATH), "{warning}");
+        assert!(warning.contains("sudo install"), "{warning}");
+    }
+
+    #[test]
+    fn an_installed_binary_does_not_warn() {
+        for path in [
+            "/usr/local/bin/sentinel",
+            "/usr/bin/sentinel",
+            "/opt/sentinel/bin/sentinel",
+        ] {
+            assert!(transient_binary_warning(Path::new(path)).is_none(), "{path}");
+        }
+    }
+
+    #[test]
+    fn the_unit_can_be_told_which_binary_to_run() {
+        // So a release binary can be installed and the unit written in one
+        // step, before the file is in its final place.
+        let sandbox = Sandbox::new();
+        let options = Options {
+            binary: Some(Path::new("/usr/local/bin/sentinel")),
+            ..Options::default()
+        };
+        sandbox.install("agent", options).expect("install");
+
+        let unit = std::fs::read_to_string(sandbox.units().join("sentinel-agent.service")).expect("unit");
+        assert!(unit.contains("ExecStart=/usr/local/bin/sentinel"), "{unit}");
     }
 
     #[test]

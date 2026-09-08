@@ -151,15 +151,15 @@ fn no_template_names_a_real_production_host() {
     // The same rule the source tree is held to: deployment specifics are the
     // operator's, not ours.
     let deployment_names = [
-        "creator2",
-        "creator3",
-        "andre01",
-        "david01",
-        "grace01",
-        "preproc01",
-        "hiegm5",
+        "node02",
+        "node03",
+        "node01",
+        "node08",
+        "node10",
+        "node12",
+        "node13",
         "filesrv01",
-        "mizuno_cluster",
+        "example_cluster",
     ];
 
     for path in templates() {

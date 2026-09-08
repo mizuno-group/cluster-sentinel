@@ -251,10 +251,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_target_with_no_capabilities_is_not_probed() {
+    async fn a_target_with_no_capabilities_is_still_checked_for_reachability() {
+        // Reachability needs nothing installed on the far end, and a peer that
+        // only watched hosts already known to be watchable would be no use for
+        // the hosts that most need watching.
         let mut peers = PeerProbes::new(host("watcher"));
         peers.set_targets(1, vec![dead_target("target", &[]).await]);
-        assert!(peers.observe_all().await.is_empty());
+
+        let probes: Vec<String> = peers
+            .observe_all()
+            .await
+            .iter()
+            .map(|o| o.probe_id.to_string())
+            .collect();
+
+        assert_eq!(probes, vec![crate::probes::network::PROBE_ID.to_string()]);
     }
 
     #[tokio::test]

@@ -139,7 +139,19 @@ pub fn render(report: &StatusReport) -> String {
     out.push_str(&format!("ENVIRONMENT: {}\n", report.environment));
 
     if report.entities.is_empty() {
-        out.push_str("\nNo entities known yet. Run discovery, or register an agent.\n");
+        // An empty board is the normal state of a controller that has just
+        // been installed, and saying only "nothing here" leaves an operator
+        // with no idea which of the two sources is missing.
+        out.push_str(
+            "\nNo entities known yet.\n\n\
+             Two things put entities here:\n\n\
+            \x20 * Slurm discovery. Check that the configuration has\n\
+            \x20     [discovery.slurm]\n\
+            \x20     enabled = true\n\
+            \x20   then run: sentinel discover\n\n\
+            \x20 * Agents registering. Deploy them (docs/DEPLOYMENT.md section 6),\n\
+            \x20   or declare hosts that will not run one with [[entities]].\n",
+        );
         return out;
     }
 
@@ -251,6 +263,18 @@ mod tests {
         let mut state = EntityState::unknown(entity);
         state.set_component(component, ComponentState::new(health));
         state
+    }
+
+    #[test]
+    fn an_empty_board_says_what_would_fill_it() {
+        // The normal state of a freshly installed controller. "Nothing here"
+        // alone leaves an operator with no idea which source is missing.
+        let report = StatusReport::build("lab", &Inventory::new(), &BTreeMap::new());
+        let text = render(&report);
+
+        assert!(text.contains("discovery.slurm"), "{text}");
+        assert!(text.contains("sentinel discover"), "{text}");
+        assert!(text.contains("Agents registering"), "{text}");
     }
 
     #[test]
