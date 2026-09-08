@@ -1,0 +1,191 @@
+# Cluster Sentinel — controller
+#
+# 配置先: /etc/sentinel/config.toml（controller を動かす host）
+# 検証:   sudo -u sentinel sentinel config check
+#
+# CHANGE-ME を実際の値へ置き換えてください。
+
+config_version = 1
+
+# 全 host で一致させること。agent 側の environment と一致しないと登録されません。
+environment = "CHANGE-ME-environment"
+
+[controller]
+listen = "0.0.0.0:7443"
+inventory_interval = "5m"
+
+# controller 自身も観測点として動作します。
+# firewall の内側にいて視界が偏る場合のみ false にしてください。
+observe = true
+
+[database]
+path = "/var/lib/sentinel/sentinel.db"
+
+[peer_monitoring]
+# 1 entity あたりの observer 数。
+# 0 にすると到達性の診断（HOST_UNREACHABLE / PATH_SPECIFIC_NETWORK_FAILURE）が
+# 一切行われなくなります。
+degree = 3
+
+[discovery.slurm]
+enabled = true
+# scontrol が PATH にない場合のみ指定
+# scontrol_path = "/opt/slurm/bin/scontrol"
+
+[notification]
+# 導入初期は "critical" から始めるのも有効です。
+min_severity = "warning"
+
+# 宛先。複数指定でき、重複排除は宛先ごとに行われます。
+# [[notification.webhooks]]
+# name = "ntfy"
+# url  = "https://ntfy.example.org/CHANGE-ME"
+
+
+# ===========================================================================
+# Scheduler entity
+#
+# Slurm の ClusterName に合わせておくと分かりやすくなります。
+# 省略した場合の既定値は "slurm" です。
+# ===========================================================================
+[[entities]]
+type = "scheduler"
+name = "CHANGE-ME-cluster-name"
+
+
+# ===========================================================================
+# Slurm の外にある host
+#
+# Slurm discovery では見つからないため、ここで宣言します。
+# 後から agent を入れる予定でも、先に書いて構いません（merge されます）。
+# ===========================================================================
+[[entities]]
+type = "host"
+name = "CHANGE-ME-fileserver-1"
+addresses = ["CHANGE-ME-10.0.0.10"]
+capabilities = ["storage.nfs.server", "observer.peer"]
+labels = { role = "fileserver" }
+# SSH が 22 以外の場合のみ。agent がいない host では自動検出できません。
+# ports = { ssh = 2222 }
+
+[[entities]]
+type = "host"
+name = "CHANGE-ME-fileserver-2"
+addresses = ["CHANGE-ME-10.0.0.11"]
+capabilities = ["storage.nfs.server", "observer.peer"]
+labels = { role = "fileserver" }
+
+
+# ===========================================================================
+# Storage entity
+#
+# fileserver そのものとは別の概念として扱います。
+# 「fileserver は生きているが export service だけ落ちた」を
+# 表現するために必要です。
+# ===========================================================================
+[[entities]]
+type = "storage"
+name = "CHANGE-ME-storage-1"
+
+[[entities]]
+type = "storage"
+name = "CHANGE-ME-storage-2"
+
+
+# ===========================================================================
+# 依存関係     from が to に依存する
+#
+# ここを書かないと、複数 node が同時に storage 障害を起こしたとき、
+# SHARED_STORAGE_FAILURE（原因 = fileserver）ではなく
+# 個別の NFS_CLIENT_FAILURE として報告されます。
+# 5 人が 5 つの症状を追いかけることになります。
+#
+# 宣言していない entity を参照しても warning で済みます
+# （Slurm discovery や agent registration から到着し得るため）。
+#
+# したがって `sentinel config check` は、compute node への依存について
+#
+#   warning: dependencies[N].from: host/... is not declared here;
+#            it must come from discovery or registration
+#
+# を出します。**これは正常です。** compute node は Slurm discovery から
+# 到着するため、ここで宣言する必要はありません。
+# ===========================================================================
+
+# storage は fileserver が提供する
+[[dependencies]]
+from = "storage/CHANGE-ME-storage-1"
+to   = "host/CHANGE-ME-fileserver-1"
+type = "provides"
+
+[[dependencies]]
+from = "storage/CHANGE-ME-storage-2"
+to   = "host/CHANGE-ME-fileserver-2"
+type = "provides"
+
+# storage-1 を使う node（実構成に合わせて増やす）
+[[dependencies]]
+from = "host/CHANGE-ME-compute-1"
+to   = "storage/CHANGE-ME-storage-1"
+type = "uses_storage"
+
+[[dependencies]]
+from = "host/CHANGE-ME-compute-2"
+to   = "storage/CHANGE-ME-storage-1"
+type = "uses_storage"
+
+# storage-2 を使う node
+[[dependencies]]
+from = "host/CHANGE-ME-compute-3"
+to   = "storage/CHANGE-ME-storage-2"
+type = "uses_storage"
+
+
+# ===========================================================================
+# capability の上書き（必要な場合のみ）
+#
+# 優先順位:  disable > force > runtime discovery > enable / role hint
+#
+# 想定と違う場合は、まず対象 host で `sentinel doctor` を実行し、
+# 判定理由を確認してください。
+# ===========================================================================
+# [capabilities]
+# "storage.nfs.server" = "force"
+# "storage.smart"      = "disable"
+
+
+# ===========================================================================
+# 記録の保持期間
+#
+# database は書き込み一方です。何も消さなければ埋まります。
+# 実測で host 1 台あたり 1 日約 170 MB。
+#
+# 既定値のままで prune は有効です。このセクションを書くのは、
+# 既定と違う期間にしたい場合だけです。
+# ===========================================================================
+# [retention]
+# enabled            = true
+# interval           = "1h"
+# observations       = "14d"    # 容量の大半。"never" も指定可
+# keep_per_entity    = 64       # 期間に関わらず entity ごとに残す件数
+# transitions        = "90d"
+# resolved_incidents = "180d"   # open な incident は年齢に関わらず消えません
+# diagnoses          = "30d"
+
+
+# ===========================================================================
+# TLS（controller 側）
+#
+# credential は bearer token です。平文で運用すると、
+# wire を読める者が全 agent になりすませます。
+#
+# 証明書は既存の PKI で発行してください。Sentinel は生成しません。
+# 手順は docs/DEPLOYMENT.md §9.6 を参照。
+# ===========================================================================
+# [tls]
+# cert = "/etc/sentinel/tls/controller.crt"
+# key  = "/etc/sentinel/tls/controller.key"
+#
+# 以下を書くと client 証明書が「必須」になります（任意にはなりません）。
+# token が漏れても耐えられる構成はこれだけです。
+# client_ca = "/etc/sentinel/tls/ca.crt"

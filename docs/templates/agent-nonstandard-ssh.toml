@@ -1,0 +1,32 @@
+# Cluster Sentinel — agent（SSH が 22 以外の場合）
+#
+# 配置先: /etc/sentinel/config.toml
+#
+# 通常はこのファイルは不要です。agent は /etc/ssh/sshd_config の
+# `Port` および `ListenAddress host:port` を読んで自動検出します。
+#
+# 明示が必要なのは次の場合だけです。
+#   * sshd_config が読めない（権限、または別パス）
+#   * ポートが sshd_config 以外の場所で設定されている
+#     （systemd socket activation、include されたファイル等）
+#
+# 優先順位:  [agent] ssh_port  >  sshd_config の Port  >  既定値 22
+#
+# 設定しないまま SSH が 22 以外だと、probe が閉じたポートを叩き、
+# **全 host が SSH 障害として報告されます。**
+
+config_version = 1
+environment = "CHANGE-ME-environment"
+
+[agent]
+controller_address = "CHANGE-ME-controller-host:7443"
+spool_path = "/var/lib/sentinel/spool.db"
+listen = "0.0.0.0:7444"
+
+# ここ
+ssh_port = 2222
+
+roles = ["compute"]
+
+[capabilities]
+"observer.peer" = "force"

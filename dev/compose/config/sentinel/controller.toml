@@ -1,0 +1,75 @@
+# Sentinel controller configuration for the pseudo-cluster.
+#
+# Note what is here and what is not: the fileservers and the storage domains
+# are declared, because nothing discovers them automatically. The compute nodes
+# are not, because Slurm reports them. Both kinds end up in one inventory.
+
+config_version = 1
+environment = "testbed"
+
+[controller]
+listen = "0.0.0.0:7443"
+inventory_interval = "10s"
+# Diagnosis is cheap and decides how fast a fault is reported.
+diagnosis_interval = "5s"
+
+[database]
+path = "/var/lib/sentinel/sentinel.db"
+
+[peer_monitoring]
+degree = 3
+
+[discovery.slurm]
+enabled = true
+
+[[entities]]
+type = "scheduler"
+name = "sentinel-testbed"
+
+# Hosts outside Slurm. Sentinel must monitor these exactly as well
+# (SPEC.md §180).
+[[entities]]
+type = "host"
+name = "filesrv01"
+labels = { role = "fileserver" }
+
+[[entities]]
+type = "host"
+name = "filesrv02"
+labels = { role = "fileserver" }
+
+[[entities]]
+type = "storage"
+name = "storage01"
+
+[[entities]]
+type = "storage"
+name = "storage02"
+
+# Two storage domains with different clients, so that a shared-storage failure
+# is distinguishable from a client-local one: compute01 and compute02 share
+# storage01, while compute03 does not.
+[[dependencies]]
+from = "storage/storage01"
+to = "host/filesrv01"
+type = "provides"
+
+[[dependencies]]
+from = "storage/storage02"
+to = "host/filesrv02"
+type = "provides"
+
+[[dependencies]]
+from = "host/compute01"
+to = "storage/storage01"
+type = "uses_storage"
+
+[[dependencies]]
+from = "host/compute02"
+to = "storage/storage01"
+type = "uses_storage"
+
+[[dependencies]]
+from = "host/compute03"
+to = "storage/storage02"
+type = "uses_storage"

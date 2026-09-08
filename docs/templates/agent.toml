@@ -1,0 +1,77 @@
+# Cluster Sentinel — agent
+#
+# 配置先: /etc/sentinel/config.toml（監視対象の各 host）
+# 検証:   sudo -u sentinel sentinel config check
+#
+# 全 agent host で同じ内容にできます。
+# capability は agent が自動検出するため、列挙する必要はありません。
+
+config_version = 1
+
+# controller の environment と一致させること。
+environment = "CHANGE-ME-environment"
+
+[agent]
+controller_address = "CHANGE-ME-controller-host:7443"
+spool_path = "/var/lib/sentinel/spool.db"
+
+# health endpoint。peer がここを見て
+# 「agent だけ落ちた」と「host が落ちた」を区別します。
+# 変更した場合、agent が自分で controller に報告するため
+# controller 側への追記は不要です。
+listen = "0.0.0.0:7444"
+
+# ---------------------------------------------------------------------------
+# peer がこの host に到達するアドレス
+#
+# 未指定なら自動検出しますが、「どの NIC でクラスタ内通信をしているか」は
+# site の事実であり、host を調べても分かりません。
+# VLAN や bridge、複数 fabric がある環境では **必ず指定してください。**
+#
+# `sentinel doctor` で、報告されるアドレスと候補を確認できます。
+# ---------------------------------------------------------------------------
+# interface = "vlan20"          # NIC 名（fleet で同じ 1 行が使える）
+# address   = "192.168.20.2"    # 直接指定（NAT 越しなど）
+
+# SSH が 22 以外で、かつ /etc/ssh/sshd_config から読めない場合のみ指定。
+# 通常は agent が sshd_config から自動検出します。
+# ssh_port = 2222
+
+# UI 上のグループ分けと既定値の提示にのみ使われます。
+# probe を有効化することはありません。
+roles = ["compute"]
+
+
+# ===========================================================================
+# この host を peer observer にする場合
+#
+# observer は互いに異なる障害ドメインから選んでください。
+# 同じ storage の背後にいる 3 台は、視点 1 つを 3 回数えているだけです。
+#
+# observer が 1 台以下の entity については、
+# 到達性の診断が一切行われません。
+# ===========================================================================
+[capabilities]
+"observer.peer" = "force"
+
+
+# ===========================================================================
+# TLS（agent 側）
+#
+# ここに 1 つでも設定があると、controller_address の "host:port" は
+# https:// として解釈されます。
+#
+# 手順は docs/DEPLOYMENT.md §9.6 を参照。
+# ===========================================================================
+# [tls]
+# ca = "/etc/sentinel/tls/ca.crt"
+#
+# mutual TLS の場合。証明書は host ごとに発行してください。
+# client_cert = "/etc/sentinel/tls/agent.crt"
+# client_key  = "/etc/sentinel/tls/agent.key"
+#
+# IP で接続し、証明書は名前しか持たない場合。
+# server_name = "CHANGE-ME-controller-host"
+#
+# PKI がまだ無い場合の暫定措置。TLS を装飾に変えます。
+# insecure_skip_verify = true

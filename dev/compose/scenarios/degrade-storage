@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Make a fileserver's storage service slow rather than dead.
+#
+# Storage that answers eventually is harder than storage that does not answer
+# at all, and it is the more common real failure.
+source "$(dirname "$0")/_lib.sh"
+
+target="${1:-filesrv01}"
+mode="${2:-slow}"
+require_service "${target}"
+
+case "${mode}" in
+    slow|hang|ok) ;;
+    *) echo "usage: degrade-storage <fileserver> [slow|hang|ok]" >&2; exit 64 ;;
+esac
+
+announce "setting storage health on ${target} to ${mode}"
+in_container "${target}" sh -c "printf '%s' '${mode}' > /var/lib/sentinel/storage-health"
+
+if [[ "${mode}" == "hang" ]]; then
+    echo
+    echo "NOTE: this is a userspace stall, NOT kernel D-state. Real NFS"
+    echo "hard-mount behaviour cannot be reproduced in a container and is a"
+    echo "VM test requirement (docs/DEVELOPMENT.md)."
+fi
+
+expect "storage DEGRADED on ${target}, not UNAVAILABLE" \
+       "clients of its storage domain degraded, not failed"

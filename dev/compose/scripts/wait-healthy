@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Block until the pseudo-cluster is ready, or fail with a useful diagnosis.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+TIMEOUT="${WAIT_TIMEOUT:-180}"
+CONTROLLER_URL="http://localhost:17443/v1/health"
+EXPECTED_AGENTS="${EXPECTED_AGENTS:-5}"
+
+deadline=$(( $(date +%s) + TIMEOUT ))
+
+step() { printf '==> %s' "$1"; }
+ok()   { printf ' ok\n'; }
+fail() {
+    printf ' FAILED\n\n'
+    echo "--- container status ---"
+    docker compose ps
+    echo
+    echo "--- controller log (last 40 lines) ---"
+    docker compose logs --tail 40 controller 2>&1 || true
+    exit 1
+}
+
+wait_for() {
+    local description="$1"; shift
+    step "${description}"
+    while (( $(date +%s) < deadline )); do
+        if "$@" >/dev/null 2>&1; then
+            ok
+            return 0
+        fi
+        printf '.'
+        sleep 2
+    done
+    fail
+}
+
+controller_healthy() { curl -fsS "${CONTROLLER_URL}"; }
+
+slurm_nodes_registered() {
+    # Every node must be known AND have actually registered. Checking only for
+    # the absence of DOWN is not enough: a node whose slurmd never started sits
+    # in UNKNOWN+NOT_RESPONDING, which would let a broken cluster pass for a
+    # ready one and make every later assertion meaningless.
+    local output
+    output=$(docker compose exec -T controller scontrol show nodes -o 2>/dev/null) || return 1
+    [[ $(grep -c '^NodeName=' <<<"${output}") -eq 3 ]] || return 1
+    ! grep -qE 'State=[^ ]*(DOWN|NOT_RESPONDING|UNKNOWN)' <<<"${output}"
+}
+
+agents_registered() {
+    local count
+    count=$(curl -fsS "${CONTROLLER_URL}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["agents"])') || return 1
+    (( count >= EXPECTED_AGENTS ))
+}
+
+storage_healthy() {
+    docker compose exec -T filesrv01 curl -fsS http://localhost:2050/ >/dev/null &&
+    docker compose exec -T filesrv02 curl -fsS http://localhost:2050/ >/dev/null
+}
+
+wait_for "waiting for the controller API" controller_healthy
+wait_for "waiting for Slurm to register its nodes" slurm_nodes_registered
+wait_for "waiting for storage services" storage_healthy
+wait_for "waiting for ${EXPECTED_AGENTS} agents to register" agents_registered
+
+echo
+echo "pseudo-cluster ready."
+echo "  controller API:  ${CONTROLLER_URL}"
+echo "  status:          ./scripts/sentinel status"
+echo "  scenarios:       ./scenarios/<name> [target]"

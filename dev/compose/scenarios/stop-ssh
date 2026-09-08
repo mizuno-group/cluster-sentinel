@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Stop only the SSH server on one host.
+#
+# An operator locked out of a machine that is otherwise perfectly healthy is a
+# real and common situation, and it must not read as an outage.
+source "$(dirname "$0")/_lib.sh"
+
+target="${1:-compute01}"
+require_service "${target}"
+
+announce "stopping sshd on ${target}"
+supervisor "${target}" stop sshd
+
+expect "SSH_SERVICE_FAILURE on ${target}" \
+       "NOT HOST_UNREACHABLE: the Sentinel RPC still answers"

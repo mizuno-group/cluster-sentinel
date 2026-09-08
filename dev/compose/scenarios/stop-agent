@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Stop only the Sentinel agent on one host.
+#
+# Everything else keeps running, so this separates "the monitoring is broken"
+# from "the machine is broken" — a distinction a naive up/down monitor cannot
+# make, and one that causes real 3am mistakes.
+source "$(dirname "$0")/_lib.sh"
+
+target="${1:-compute01}"
+require_service "${target}"
+
+announce "stopping the Sentinel agent on ${target}"
+supervisor "${target}" stop sentinel-agent
+
+expect "SENTINEL_AGENT_FAILURE on ${target}" \
+       "NOT HOST_UNREACHABLE: SSH, Slurm and the network are all still fine"

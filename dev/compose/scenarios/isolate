@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Cut the network path between two containers, and only between them.
+#
+#   ./scenarios/isolate controller compute01
+#
+# This is the most important scenario in the set. Everything else in the
+# cluster can still reach compute01, so a monitor that concludes
+# HOST_UNREACHABLE from the controller's own blind spot is wrong -- and would
+# send someone to the datacentre for a healthy machine.
+source "$(dirname "$0")/_lib.sh"
+
+from="${1:?usage: isolate <from-service> <to-service>}"
+to="${2:?usage: isolate <from-service> <to-service>}"
+require_service "${from}"
+require_service "${to}"
+
+to_ip=$(docker compose exec -T "${to}" hostname -i | tr -d '\r' | awk '{print $1}')
+from_ip=$(docker compose exec -T "${from}" hostname -i | tr -d '\r' | awk '{print $1}')
+
+announce "cutting ${from} (${from_ip}) <-> ${to} (${to_ip})"
+
+# Both directions, so the path is genuinely broken rather than half-open.
+docker compose exec -T "${from}" iptables -A OUTPUT -d "${to_ip}" -j DROP
+docker compose exec -T "${from}" iptables -A INPUT -s "${to_ip}" -j DROP
+docker compose exec -T "${to}" iptables -A OUTPUT -d "${from_ip}" -j DROP
+docker compose exec -T "${to}" iptables -A INPUT -s "${from_ip}" -j DROP
+
+echo "Every other path is untouched."
+
+expect "PATH_SPECIFIC_NETWORK_FAILURE between ${from} and ${to}" \
+       "NOT HOST_UNREACHABLE: other observers still reach ${to} (SPEC.md §175)"

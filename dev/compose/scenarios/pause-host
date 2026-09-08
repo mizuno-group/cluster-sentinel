@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Freeze every process in a container.
+#
+# Closer to a wedged machine than stopping it is: the container still holds its
+# address and its connections, but nothing inside it runs. Network probes time
+# out rather than being refused.
+#
+# It is still NOT a kernel hard lock (docs/DEVELOPMENT.md).
+source "$(dirname "$0")/_lib.sh"
+
+target="${1:-compute01}"
+require_service "${target}"
+
+announce "pausing ${target}"
+docker compose pause "${target}"
+
+expect "HOST_UNREACHABLE on ${target} once several observers agree" \
+       "NOT POWER_OFF: nothing here is evidence about power (SPEC.md §52)"

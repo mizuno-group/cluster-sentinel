@@ -1,0 +1,20 @@
+# Sentinel agent configuration for every non-controller container.
+#
+# Deliberately minimal (SPEC.md §130): the agent discovers its own
+# capabilities, and `roles` is a grouping label that never enables a probe.
+
+config_version = 1
+environment = "testbed"
+
+[agent]
+controller_address = "controller:7443"
+spool_path = "/var/lib/sentinel/spool.db"
+
+[database]
+path = "/var/lib/sentinel/agent.db"
+
+# Every host in the testbed is a peer observer. Capability, not role: this is
+# an explicit operator decision about what the host may do, and it is what
+# lets a path failure be told apart from a dead host (SPEC.md §45).
+[capabilities]
+"observer.peer" = "force"

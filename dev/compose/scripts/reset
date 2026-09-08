@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Destroy the pseudo-cluster completely, including its database and munge key,
+# and bring it back from nothing.
+#
+# Use this when a scenario has left the cluster in a state you do not want to
+# reason about. `recover-all` is the gentler option.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+echo "==> tearing down, including volumes"
+docker compose down --volumes --remove-orphans
+
+exec ./scripts/up "$@"

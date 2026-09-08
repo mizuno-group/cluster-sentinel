@@ -1,0 +1,110 @@
+# Release builds (IMPLEMENTATION.md §41).
+#
+# The production artefact is a single binary, so a release is that binary and
+# nothing else. Two things decide how it is built:
+#
+#   * **Static linking against musl.** A binary linked against the build
+#     machine's glibc refuses to start on a node with an older one, which on a
+#     cluster is most of them. Static means the same file runs on every node
+#     regardless of distribution age.
+#   * **Native builds per architecture.** Clusters accumulate hardware, and
+#     x86_64 and aarch64 nodes sit in the same one. Cross-compiling would work
+#     but emulated builds are slow and untested; a native runner per
+#     architecture is neither.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # So a release build can be rehearsed without creating a tag that cannot be
+  # taken back.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # One architecture failing must not throw away the other's artefact.
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      # `ring` compiles C, so musl needs a C toolchain even though everything
+      # else here is Rust.
+      - name: musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      # A release binary that does not run is worse than no release. This is
+      # the one check that can only be made on the machine that will run it.
+      - name: The binary runs and knows what it is
+        run: |
+          ./target/${{ matrix.target }}/release/sentinel version
+          ./target/${{ matrix.target }}/release/sentinel version | grep -q "${{ matrix.target }}"
+
+      - name: It is genuinely static
+        run: |
+          if ldd ./target/${{ matrix.target }}/release/sentinel 2>&1 | grep -qv "not a dynamic executable\|statically linked"; then
+            echo "the binary has dynamic dependencies:"
+            ldd ./target/${{ matrix.target }}/release/sentinel
+            exit 1
+          fi
+
+      - name: Name it after its target
+        run: |
+          mkdir -p dist
+          cp ./target/${{ matrix.target }}/release/sentinel dist/sentinel-${{ matrix.target }}
+          cd dist && sha256sum sentinel-${{ matrix.target }} > sentinel-${{ matrix.target }}.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-${{ matrix.target }}
+          path: dist/*
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    # Only a tag makes a release; a manual run just proves the build works.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file .github/release-notes.md \
+            --verify-tag

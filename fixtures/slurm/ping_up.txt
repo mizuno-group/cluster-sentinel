@@ -1,0 +1,1 @@
+Slurmctld(primary) at ctl-a is UP

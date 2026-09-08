@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""A stand-in for an NFS server, for the Docker testbed only.
+
+Why this is not a real `nfsd`
+----------------------------
+Running a real NFS server in a container needs kernel modules and privileges
+that are unreliable under WSL2, and a hung kernel mount inside a container can
+take the *host* with it. `IMPLEMENTATION.md` §11 anticipates exactly this and
+says to reproduce service and network semantics here, deferring kernel-level
+NFS behaviour to a VM.
+
+So this reproduces what the Docker layer can honestly test:
+
+  * a service that listens on the NFS port, so TCP probes mean something;
+  * an export list that can be read;
+  * a health file that scenarios can flip to simulate degradation;
+  * a service that can be stopped while its host stays up, which is the
+    distinction between NFS_SERVICE_FAILURE and a dead fileserver.
+
+It does NOT reproduce, and no test here may claim to cover:
+
+  * hard-mount kernel stalls and uninterruptible sleep;
+  * client-side D-state;
+  * real `exportfs` behaviour or NFS protocol semantics.
+
+Those are level 4, in `docs/DEVELOPMENT.md`.
+"""
+
+import http.server
+import json
+import os
+import socket
+import socketserver
+import sys
+import threading
+import time
+
+NFS_PORT = int(os.environ.get("STORAGE_PORT", "2049"))
+STATUS_PORT = int(os.environ.get("STORAGE_STATUS_PORT", "2050"))
+EXPORTS_FILE = os.environ.get("STORAGE_EXPORTS", "/etc/exports")
+HEALTH_FILE = os.environ.get("STORAGE_HEALTH", "/var/lib/sentinel/storage-health")
+
+
+def health():
+    """Read the injected health state, defaulting to healthy."""
+    try:
+        with open(HEALTH_FILE, "r", encoding="utf-8") as handle:
+            return handle.read().strip() or "ok"
+    except FileNotFoundError:
+        return "ok"
+
+
+def exports():
+    try:
+        with open(EXPORTS_FILE, "r", encoding="utf-8") as handle:
+            return [
+                line.split()[0]
+                for line in handle
+                if line.strip() and not line.startswith("#")
+            ]
+    except FileNotFoundError:
+        return []
+
+
+class NfsPortHandler(socketserver.BaseRequestHandler):
+    """Accept a connection on the NFS port so a TCP probe can succeed.
+
+    Under injected `slow` health the accept is delayed, which is how a
+    degraded-but-alive service is reproduced.
+    """
+
+    def handle(self):
+        state = health()
+        if state == "slow":
+            time.sleep(float(os.environ.get("STORAGE_SLOW_SECONDS", "3")))
+        elif state == "hang":
+            # Accept and then never reply: the closest a userspace process can
+            # get to a stuck server. It is *not* kernel D-state.
+            time.sleep(3600)
+            return
+        try:
+            self.request.sendall(b"storage-ok\n")
+        except OSError:
+            pass
+
+
+class ThreadedTcp(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+class StatusHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):  # noqa: N802 - required by the base class
+        body = json.dumps(
+            {
+                "service": "storage",
+                "host": socket.gethostname(),
+                "health": health(),
+                "exports": exports(),
+                "port": NFS_PORT,
+            }
+        ).encode()
+        self.send_response(200 if health() == "ok" else 503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+
+def main():
+    print(f"storage-service: listening on {NFS_PORT} (status {STATUS_PORT})", flush=True)
+    threading.Thread(
+        target=lambda: ThreadedTcp(("0.0.0.0", NFS_PORT), NfsPortHandler).serve_forever(),
+        daemon=True,
+    ).start()
+    http.server.ThreadingHTTPServer(("0.0.0.0", STATUS_PORT), StatusHandler).serve_forever()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(0)

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Stop only slurmd on one host.
+#
+# The host stays up, SSH answers, the agent reports normally. Only the
+# scheduler's daemon is gone.
+source "$(dirname "$0")/_lib.sh"
+
+target="${1:-compute01}"
+require_service "${target}"
+
+announce "stopping slurmd on ${target}"
+supervisor "${target}" stop slurmd
+
+echo
+echo "Slurm will take up to SlurmdTimeout (30s) to notice."
+
+expect "SLURMD_SERVICE_FAILURE on ${target}" \
+       "NOT HOST_UNREACHABLE, and NOT a fault of the host itself"

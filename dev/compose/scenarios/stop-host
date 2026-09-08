@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Stop a container outright: the strongest "host is gone" this testbed offers.
+source "$(dirname "$0")/_lib.sh"
+
+target="${1:-compute01}"
+require_service "${target}"
+
+announce "stopping ${target}"
+docker compose stop "${target}"
+
+expect "HOST_UNREACHABLE on ${target}, confidence HIGH once observers agree" \
+       "NOT POWER_OFF: network silence is not evidence about power"

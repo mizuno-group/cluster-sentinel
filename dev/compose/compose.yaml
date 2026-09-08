@@ -1,0 +1,161 @@
+# The Sentinel pseudo-cluster.
+#
+# Six containers standing in for a controller, three compute nodes and two
+# fileservers. This is a first-class development artefact, not a demo: the
+# scenario scripts break it on purpose, and the integration tests assert what
+# Sentinel concludes when they do (IMPLEMENTATION.md §6).
+#
+# It is NOT a production deployment mechanism. Production is systemd on a real
+# host, and nothing container-specific may leak into Sentinel itself
+# (IMPLEMENTATION.md §12, §13).
+
+name: sentinel-testbed
+
+x-common: &common
+  build:
+    context: ../..
+    dockerfile: dev/compose/images/Dockerfile
+  image: sentinel-testbed:latest
+  environment: &common-env
+    SENTINEL_TOKEN: "testbed-credential-0123456789abcdef"
+  cap_add:
+    # The network-partition scenarios add iptables rules inside a container to
+    # cut one path while leaving the others intact. That is the only way to
+    # reproduce a path-specific failure, which is the fault Sentinel most needs
+    # to tell apart from a dead host.
+    - NET_ADMIN
+  init: true
+  networks:
+    - cluster
+
+services:
+  controller:
+    <<: *common
+    container_name: sentinel-controller
+    hostname: controller
+    # Docker mounts /sys/fs/cgroup read-only unless the container is
+    # privileged, and Slurm's cgroup/v2 plugin has to create a scope directory
+    # under it -- work systemd would normally do, and which no capability short
+    # of privileged permits.
+    #
+    # Confined to the containers that actually run a Slurm daemon, and to this
+    # throwaway local testbed. Production runs under systemd on a native host
+    # with none of this; the generated systemd units are hardened in the
+    # opposite direction (see `sentinel install`).
+    privileged: true
+    cgroup: private
+    environment:
+      <<: *common-env
+      SENTINEL_ROLE: controller
+    volumes:
+      - ./config/slurm/slurm.conf:/etc/slurm/slurm.conf:ro
+      - ./config/slurm/cgroup.conf:/etc/slurm/cgroup.conf:ro
+      - ./config/sentinel/controller.toml:/etc/sentinel/config.toml:ro
+      - munge-key:/etc/munge-shared:ro
+      - controller-state:/var/lib/sentinel
+    ports:
+      # Exposed so tests and `sentinel status` can reach the API from the host.
+      - "17443:7443"
+    depends_on:
+      munge-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:7443/v1/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+
+  compute01: &compute
+    <<: *common
+    container_name: sentinel-compute01
+    hostname: compute01
+    # See the note on the controller: needed only to create the cgroup scope
+    # that systemd would create in production.
+    privileged: true
+    cgroup: private
+    environment:
+      <<: *common-env
+      SENTINEL_ROLE: compute
+    volumes:
+      - ./config/slurm/slurm.conf:/etc/slurm/slurm.conf:ro
+      - ./config/slurm/cgroup.conf:/etc/slurm/cgroup.conf:ro
+      - ./config/sentinel/agent.toml:/etc/sentinel/config.toml:ro
+      - munge-key:/etc/munge-shared:ro
+    depends_on:
+      controller:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "supervisorctl -c /etc/supervisor/roles/compute.conf status slurmd | grep -q RUNNING"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  compute02:
+    <<: *compute
+    container_name: sentinel-compute02
+    hostname: compute02
+
+  compute03:
+    <<: *compute
+    container_name: sentinel-compute03
+    hostname: compute03
+
+  filesrv01: &fileserver
+    <<: *common
+    container_name: sentinel-filesrv01
+    hostname: filesrv01
+    environment:
+      <<: *common-env
+      SENTINEL_ROLE: fileserver
+    volumes:
+      - ./config/sentinel/agent.toml:/etc/sentinel/config.toml:ro
+      - munge-key:/etc/munge-shared:ro
+    depends_on:
+      controller:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:2050/"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  filesrv02:
+    <<: *fileserver
+    container_name: sentinel-filesrv02
+    hostname: filesrv02
+
+  # Generates the shared munge key once, before anything that needs it starts.
+  # Slurm authentication fails in confusing ways if the containers disagree
+  # about the key, so it is created in one place and shared by volume.
+  munge-init:
+    <<: *common
+    container_name: sentinel-munge-init
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        if [[ ! -s /etc/munge-shared/munge.key ]]; then
+          dd if=/dev/urandom bs=1 count=1024 of=/etc/munge-shared/munge.key status=none
+        fi
+        chown munge:munge /etc/munge-shared/munge.key
+        chmod 0400 /etc/munge-shared/munge.key
+        echo "munge key ready"
+    volumes:
+      # The one service that may write the key. Everyone else mounts it
+      # read-only, which is what makes the startup race impossible rather than
+      # merely unlikely.
+      - munge-key:/etc/munge-shared
+    restart: "no"
+    healthcheck:
+      disable: true
+
+networks:
+  cluster:
+    name: sentinel-testbed
+
+volumes:
+  munge-key:
+  controller-state:

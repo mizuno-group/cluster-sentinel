@@ -1,0 +1,51 @@
+[package]
+name = "sentinel"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Cluster Sentinel - generic cluster infrastructure monitoring, failure detection and incident diagnosis"
+license = "MIT"
+publish = false
+
+[lib]
+name = "sentinel"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sentinel"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "process", "signal", "sync", "io-util"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+tower = "0.5"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+futures = "0.3"
+hostname = "0.4"
+if-addrs = "0.13"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono", "uuid"] }
+async-trait = "0.1"
+humantime-serde = "1"
+humantime = "2"
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+
+[dev-dependencies]
+rcgen = "0.14.7"
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"

@@ -1,0 +1,70 @@
+#!/bin/bash
+# Bring one container up in the role named by $SENTINEL_ROLE.
+#
+# There is no systemd in a container, so supervisord stands in. That is not a
+# cosmetic choice: the failure-injection scenarios need to stop `slurmd` alone,
+# or the agent alone, and leave everything else running. A shell script that
+# backgrounds three processes cannot do that.
+set -euo pipefail
+
+ROLE="${SENTINEL_ROLE:?SENTINEL_ROLE must be set}"
+ROLE_CONFIG="/etc/supervisor/roles/${ROLE}.conf"
+
+if [[ ! -f "${ROLE_CONFIG}" ]]; then
+    echo "entrypoint: no such role: ${ROLE}" >&2
+    echo "entrypoint: available roles: $(ls /etc/supervisor/roles/ | sed 's/\.conf//' | tr '\n' ' ')" >&2
+    exit 64
+fi
+
+log() { echo "entrypoint[$(hostname)]: $*"; }
+
+# --- munge -----------------------------------------------------------------
+# Every container needs the same key, and munged refuses to start unless it is
+# 0400 owned by the munge user.
+#
+# The shared key is mounted read-only at /etc/munge-shared and copied into the
+# container's own /etc/munge, which is NOT a volume. Adjusting permissions
+# directly in the shared volume would have every container writing the same
+# path at once: they race, one wins, and the losers exit with "File exists" --
+# an intermittent startup failure that looks like anything but its cause.
+if [[ -f /etc/munge-shared/munge.key ]]; then
+    install -o munge -g munge -m 0400 /etc/munge-shared/munge.key /etc/munge/munge.key
+    chown -R munge:munge /run/munge /var/lib/munge /var/log/munge 2>/dev/null || true
+fi
+
+# --- slurm -----------------------------------------------------------------
+mkdir -p /var/spool/slurmctld /var/spool/slurmd /var/log/slurm
+chown -R slurm:slurm /var/spool/slurmctld /var/log/slurm 2>/dev/null || true
+
+# Slurm's cgroup/v2 plugin creates a scope directory under the parent slice,
+# a job systemd would normally do. The slice itself has to exist first.
+# See config/slurm/cgroup.conf for the whole story.
+if [[ -w /sys/fs/cgroup ]]; then
+    mkdir -p /sys/fs/cgroup/system.slice
+fi
+
+# --- storage role ----------------------------------------------------------
+# A real export list. The storage service reads it, and Sentinel's capability
+# discovery detects `storage.nfs.server` from it exactly as it would on a real
+# fileserver -- the capability is discovered, not declared.
+if [[ "${ROLE}" == "fileserver" && ! -f /etc/exports ]]; then
+    cat > /etc/exports <<'EXPORTS'
+# Exported by the Sentinel pseudo-cluster storage service.
+/export/home    *(rw,sync,no_subtree_check)
+/export/scratch *(rw,async,no_subtree_check)
+EXPORTS
+    mkdir -p /export/home /export/scratch
+fi
+
+# --- sentinel --------------------------------------------------------------
+mkdir -p /var/lib/sentinel /run/sentinel
+
+# The credential reaches the process through a file rather than a command
+# line, so it never appears in the process table (docs/SECURITY.md).
+if [[ -n "${SENTINEL_TOKEN:-}" && ! -f /etc/sentinel/token ]]; then
+    umask 077
+    printf '%s' "${SENTINEL_TOKEN}" > /etc/sentinel/token
+fi
+
+log "starting role ${ROLE}"
+exec /usr/bin/supervisord -n -c "${ROLE_CONFIG}"

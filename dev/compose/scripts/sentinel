@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Run a sentinel CLI command inside the controller container.
+#
+#   ./scripts/sentinel status
+#   ./scripts/sentinel entity show compute01
+#   ./scripts/sentinel dependency list
+set -euo pipefail
+cd "$(dirname "$0")/.."
+exec docker compose exec -T controller sentinel --config /etc/sentinel/config.toml "$@"

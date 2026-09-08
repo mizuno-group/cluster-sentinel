@@ -1,0 +1,17 @@
+# Cluster Sentinel — controller（最小構成）
+#
+# 動作確認用。まずこれで起動し、`sentinel status` が
+# 既存構成を正しく表示することを確認してから、
+# controller.toml の内容へ広げてください。
+
+config_version = 1
+environment = "CHANGE-ME-environment"
+
+[controller]
+listen = "0.0.0.0:7443"
+
+[database]
+path = "/var/lib/sentinel/sentinel.db"
+
+[discovery.slurm]
+enabled = true

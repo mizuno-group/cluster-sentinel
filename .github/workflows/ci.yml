@@ -1,0 +1,70 @@
+# CI (IMPLEMENTATION.md §86, §87).
+#
+# The three checks that must always pass run without Docker, so the suite stays
+# green on any machine with a Rust toolchain. The pseudo-cluster job is
+# separate and opt-in for exactly that reason: a developer without Docker
+# should still be able to run everything that does not need it.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Lints
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Tests
+        run: cargo test --all
+
+      - name: Release build
+        run: cargo build --release
+
+  pseudo-cluster:
+    name: Docker pseudo-cluster
+    runs-on: ubuntu-latest
+    # Slower and needs Docker, so it does not gate the fast checks.
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the pseudo-cluster
+        working-directory: dev/compose
+        run: ./scripts/up
+
+      - name: Integration tests
+        env:
+          SENTINEL_DOCKER_TESTS: "1"
+        run: cargo test --test m3_pseudo_cluster -- --test-threads=1
+
+      - name: v1 acceptance sequence
+        working-directory: dev/compose
+        run: ./scripts/acceptance
+
+      - name: Logs on failure
+        if: failure()
+        working-directory: dev/compose
+        run: docker compose logs --tail 200
+
+      - name: Clean up
+        if: always()
+        working-directory: dev/compose
+        run: docker compose down --volumes

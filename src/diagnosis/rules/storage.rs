@@ -1,0 +1,754 @@
+//! Storage diagnosis rules.
+//!
+//! The distinction that matters here is between a fault at the server and a
+//! fault at one client, because they are worth waking different people for:
+//!
+//! * **Shared storage failure** — several clients of one storage entity fail
+//!   together. Something upstream is broken and everything behind it is
+//!   affected.
+//! * **Client-local failure** — one client fails while its neighbours on the
+//!   same storage are fine. The server is innocent.
+//!
+//! Getting this backwards is expensive in both directions: declaring a
+//! fileserver dead because one client's mount is wedged sends people to the
+//! wrong machine, and reporting five separate client faults hides the single
+//! cause behind them.
+//!
+//! Nothing in this file names NFS. The rules work on storage entities and the
+//! dependency graph, so replacing NFS with anything else needs no change here
+//! (SPEC.md §78, §146).
+
+use std::collections::BTreeSet;
+
+use crate::diagnosis::{kind, Confidence, Diagnosis, DiagnosisContext, DiagnosisRule, RuleId};
+use crate::entity::{EntityId, EntityType};
+use crate::probes::nfs::{PROBE_CLIENT_IO, PROBE_CLIENT_MOUNT, PROBE_SERVER_EXPORTS, PROBE_SERVER_PORT};
+use crate::state::{Health, StateComponent};
+
+/// Whether a host looks reachable and alive.
+fn host_looks_healthy(context: &DiagnosisContext, host: EntityId) -> bool {
+    context.is_healthy(host, StateComponent::Network)
+        && (context.is_healthy(host, StateComponent::Agent) || context.is_healthy(host, StateComponent::Ssh))
+}
+
+/// Whether an entity's storage is currently impaired.
+fn storage_is_impaired(context: &DiagnosisContext, entity: EntityId) -> bool {
+    matches!(
+        context.component(entity, StateComponent::Storage),
+        Health::Degraded | Health::Unavailable
+    )
+}
+
+/// Evidence ids for an entity.
+fn evidence_for(context: &DiagnosisContext, entity: EntityId) -> Vec<crate::observation::ObservationId> {
+    context
+        .observations
+        .for_entity(entity)
+        .into_iter()
+        .map(|o| o.id)
+        .collect()
+}
+
+/// A fileserver's export service has failed while the host itself is up.
+///
+/// SPEC.md §172: the fileserver and its NFS service are different things, and
+/// only one of them being broken is a much smaller problem.
+pub struct StorageServiceFailure;
+
+impl DiagnosisRule for StorageServiceFailure {
+    fn id(&self) -> RuleId {
+        RuleId::new("storage.service_failure")
+    }
+
+    fn description(&self) -> &str {
+        "a storage server's export service has failed while the host is still up"
+    }
+
+    fn evaluate(&self, context: &DiagnosisContext) -> Vec<Diagnosis> {
+        let mut diagnoses = Vec::new();
+
+        for host in context.entities_of_type(EntityType::Host) {
+            let port_failed = context
+                .observation(host.id, PROBE_SERVER_PORT)
+                .is_some_and(|o| o.status.is_bad());
+            let exports_failed = context
+                .observation(host.id, PROBE_SERVER_EXPORTS)
+                .is_some_and(|o| o.status.is_bad());
+
+            if !port_failed && !exports_failed {
+                continue;
+            }
+
+            // The whole point of this rule: the machine is fine, the service is
+            // not. Without evidence of the former, this is a host problem.
+            if !host_looks_healthy(context, host.id) {
+                continue;
+            }
+
+            let detail = if port_failed && exports_failed {
+                "the export port is not answering and nothing is exported"
+            } else if port_failed {
+                "the export port is not answering"
+            } else {
+                "the port answers but nothing is exported"
+            };
+
+            diagnoses.push(
+                Diagnosis::new(kind::NFS_SERVICE_FAILURE, self.id(), Confidence::High)
+                    .affecting([host.id])
+                    .rooted_at([host.id])
+                    .with_evidence(evidence_for(context, host.id))
+                    .with_summary(format!("{} is up but {detail}", host.canonical_name))
+                    .recommending(vec![
+                        format!("systemctl status nfs-server  # on {}", host.canonical_name),
+                        format!("exportfs -v  # on {}", host.canonical_name),
+                        format!("ss -lntp sport = :2049  # on {}", host.canonical_name),
+                    ]),
+            );
+        }
+
+        diagnoses
+    }
+}
+
+/// Several clients of one storage entity are impaired at the same time.
+///
+/// The group is derived from the dependency graph rather than declared, so a
+/// new storage domain needs no code change (SPEC.md §29, §95).
+pub struct SharedStorageFailure;
+
+impl DiagnosisRule for SharedStorageFailure {
+    fn id(&self) -> RuleId {
+        RuleId::new("storage.shared_failure")
+    }
+
+    fn description(&self) -> &str {
+        "several clients of the same storage are impaired together"
+    }
+
+    fn evaluate(&self, context: &DiagnosisContext) -> Vec<Diagnosis> {
+        let impaired: Vec<EntityId> = context
+            .entities_of_type(EntityType::Host)
+            .into_iter()
+            .filter(|host| storage_is_impaired(context, host.id))
+            .map(|host| host.id)
+            .collect();
+
+        if impaired.len() < 2 {
+            // One client is not a pattern. The client-local rule owns that case.
+            return Vec::new();
+        }
+
+        let mut diagnoses = Vec::new();
+        let groups = context.inventory.graph().group_by_shared_upstream(&impaired, None);
+
+        for (upstream, members) in groups {
+            // Only storage entities are interesting here: every node in a
+            // cluster shares a scheduler, and that is not a storage fault.
+            let Some(entity) = context.entity(upstream) else {
+                continue;
+            };
+            if entity.entity_type != EntityType::Storage {
+                continue;
+            }
+
+            // Is this really shared, or is it simply that every client of this
+            // storage happens to be broken for its own reasons? If some client
+            // of the same storage is fine, the storage is probably not at fault.
+            let all_clients: BTreeSet<EntityId> = context
+                .inventory
+                .graph()
+                .downstream(upstream, None)
+                .into_iter()
+                .map(|r| r.entity)
+                .filter(|id| {
+                    context
+                        .entity(*id)
+                        .map(|e| e.entity_type == EntityType::Host)
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            let healthy_clients: Vec<EntityId> =
+                all_clients.iter().copied().filter(|id| !members.contains(id)).collect();
+
+            // Confidence follows the evidence: every client affected is a much
+            // stronger signal than some of them.
+            let confidence = if healthy_clients.is_empty() {
+                Confidence::High
+            } else {
+                Confidence::Medium
+            };
+
+            // The suspected cause is whatever provides this storage, if the
+            // graph says; otherwise the storage entity itself.
+            let providers: Vec<EntityId> = context
+                .inventory
+                .graph()
+                .dependencies_of(upstream)
+                .into_iter()
+                .map(|edge| edge.target)
+                .collect();
+            let roots = if providers.is_empty() {
+                vec![upstream]
+            } else {
+                providers
+            };
+
+            let mut evidence = evidence_for(context, upstream);
+            for member in &members {
+                evidence.extend(evidence_for(context, *member));
+            }
+
+            let names: Vec<String> = members
+                .iter()
+                .filter_map(|id| context.entity(*id))
+                .map(|e| e.canonical_name.clone())
+                .collect();
+
+            let mut affected: Vec<EntityId> = members.iter().copied().collect();
+            affected.push(upstream);
+
+            diagnoses.push(
+                Diagnosis::new(kind::SHARED_STORAGE_FAILURE, self.id(), confidence)
+                    .affecting(affected)
+                    .rooted_at(roots)
+                    .with_evidence(evidence)
+                    .with_summary(format!(
+                        "{} client(s) of {} are impaired together: {}",
+                        members.len(),
+                        entity.canonical_name,
+                        names.join(", ")
+                    ))
+                    .recommending(vec![
+                        format!("sentinel entity show {}", entity.canonical_name),
+                        "sentinel dependency list".to_string(),
+                    ]),
+            );
+        }
+
+        diagnoses
+    }
+}
+
+/// One client's storage access is broken while its neighbours are fine.
+///
+/// SPEC.md §174: this must not be reported as a fileserver failure. The most
+/// expensive possible mistake here is sending someone to reboot a fileserver
+/// that five other nodes are happily using.
+pub struct ClientLocalStorageFailure;
+
+impl DiagnosisRule for ClientLocalStorageFailure {
+    fn id(&self) -> RuleId {
+        RuleId::new("storage.client_local_failure")
+    }
+
+    fn description(&self) -> &str {
+        "one client's storage is impaired while others on the same storage are fine"
+    }
+
+    fn evaluate(&self, context: &DiagnosisContext) -> Vec<Diagnosis> {
+        let mut diagnoses = Vec::new();
+
+        for host in context.entities_of_type(EntityType::Host) {
+            if !storage_is_impaired(context, host.id) {
+                continue;
+            }
+
+            // Which storage does this client depend on, and how are its
+            // neighbours faring?
+            let storages: Vec<EntityId> = context
+                .inventory
+                .graph()
+                .upstream(host.id, None)
+                .into_iter()
+                .map(|r| r.entity)
+                .filter(|id| {
+                    context
+                        .entity(*id)
+                        .map(|e| e.entity_type == EntityType::Storage)
+                        .unwrap_or(false)
+                })
+                .collect();
+
+            if storages.is_empty() {
+                continue;
+            }
+
+            // A peer is a host depending on the same storage.
+            let mut peers: BTreeSet<EntityId> = BTreeSet::new();
+            for storage in &storages {
+                for reachable in context.inventory.graph().downstream(*storage, None) {
+                    if reachable.entity == host.id {
+                        continue;
+                    }
+                    if context.entity(reachable.entity).map(|e| e.entity_type) == Some(EntityType::Host) {
+                        peers.insert(reachable.entity);
+                    }
+                }
+            }
+
+            // With no peers there is nothing to compare against, and "only this
+            // client is affected" is not a claim the evidence supports.
+            if peers.is_empty() {
+                continue;
+            }
+
+            // If any peer is also impaired, this is not client-local; the
+            // shared rule owns it.
+            if peers.iter().any(|peer| storage_is_impaired(context, *peer)) {
+                continue;
+            }
+
+            let healthy_peers: Vec<String> = peers
+                .iter()
+                .filter_map(|id| context.entity(*id))
+                .map(|e| e.canonical_name.clone())
+                .collect();
+
+            let storage_names: Vec<String> = storages
+                .iter()
+                .filter_map(|id| context.entity(*id))
+                .map(|e| e.canonical_name.clone())
+                .collect();
+
+            let stuck = context
+                .observation(host.id, PROBE_CLIENT_IO)
+                .map(|o| {
+                    matches!(
+                        o.status,
+                        crate::observation::ProbeStatus::Stuck | crate::observation::ProbeStatus::Timeout
+                    )
+                })
+                .unwrap_or(false);
+
+            let mut actions = vec![
+                format!("findmnt -t nfs,nfs4  # on {}", host.canonical_name),
+                format!("sentinel entity show {}", host.canonical_name),
+            ];
+            if stuck {
+                actions.push(format!(
+                    "cat /proc/*/stack  # on {}, to find blocked tasks",
+                    host.canonical_name
+                ));
+            }
+
+            diagnoses.push(
+                Diagnosis::new(kind::NFS_CLIENT_FAILURE, self.id(), Confidence::High)
+                    .affecting([host.id])
+                    .rooted_at([host.id])
+                    .with_evidence(evidence_for(context, host.id))
+                    .with_summary(format!(
+                        "{}'s access to {} is impaired, but {} using the same storage {} fine",
+                        host.canonical_name,
+                        storage_names.join(", "),
+                        healthy_peers.join(", "),
+                        if healthy_peers.len() == 1 { "is" } else { "are" }
+                    ))
+                    .recommending(actions),
+            );
+        }
+
+        diagnoses
+    }
+}
+
+/// Which state component a storage probe informs, for registration.
+pub fn storage_probe_ids() -> [&'static str; 4] {
+    [
+        PROBE_CLIENT_MOUNT,
+        PROBE_CLIENT_IO,
+        PROBE_SERVER_PORT,
+        PROBE_SERVER_EXPORTS,
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::capability::CapabilitySet;
+    use crate::dependency::{DependencyEdge, DependencyType};
+    use crate::diagnosis::ObservationIndex;
+    use crate::entity::{EntityKey, ManagedEntity};
+    use crate::inventory::Inventory;
+    use crate::observation::{Observation, ProbeStatus};
+    use crate::probes::ProbeId;
+    use crate::state::{ComponentState, EntityState};
+    use std::collections::HashMap;
+
+    /// A small cluster with two storage domains, built for these tests.
+    struct World {
+        inventory: Inventory,
+        states: HashMap<EntityId, EntityState>,
+        observations: ObservationIndex,
+    }
+
+    fn host_id(name: &str) -> EntityId {
+        EntityKey::new("lab", EntityType::Host, name).entity_id()
+    }
+
+    fn storage_id(name: &str) -> EntityId {
+        EntityKey::new("lab", EntityType::Storage, name).entity_id()
+    }
+
+    impl World {
+        fn new() -> Self {
+            Self {
+                inventory: Inventory::new(),
+                states: HashMap::new(),
+                observations: ObservationIndex::new(),
+            }
+        }
+
+        fn host(mut self, name: &str) -> Self {
+            self.inventory.insert_entity(
+                ManagedEntity::new("lab", EntityType::Host, name)
+                    .with_capabilities(CapabilitySet::from_iter(["storage.nfs.client"])),
+            );
+            self
+        }
+
+        fn fileserver(mut self, name: &str) -> Self {
+            self.inventory.insert_entity(
+                ManagedEntity::new("lab", EntityType::Host, name)
+                    .with_capabilities(CapabilitySet::from_iter(["storage.nfs.server"])),
+            );
+            self
+        }
+
+        fn storage(mut self, name: &str, provided_by: &str) -> Self {
+            self.inventory
+                .insert_entity(ManagedEntity::new("lab", EntityType::Storage, name));
+            self.inventory.insert_dependency(DependencyEdge::new(
+                storage_id(name),
+                host_id(provided_by),
+                DependencyType::Provides,
+            ));
+            self
+        }
+
+        fn uses(mut self, client: &str, storage: &str) -> Self {
+            self.inventory.insert_dependency(DependencyEdge::new(
+                host_id(client),
+                storage_id(storage),
+                DependencyType::UsesStorage,
+            ));
+            self
+        }
+
+        fn storage_health(mut self, name: &str, health: Health) -> Self {
+            let id = host_id(name);
+            let state = self.states.entry(id).or_insert_with(|| EntityState::unknown(id));
+            state.set_component(StateComponent::Storage, ComponentState::new(health));
+            self
+        }
+
+        fn host_is_up(mut self, name: &str) -> Self {
+            let id = host_id(name);
+            let state = self.states.entry(id).or_insert_with(|| EntityState::unknown(id));
+            state.set_component(StateComponent::Network, ComponentState::new(Health::Healthy));
+            state.set_component(StateComponent::Agent, ComponentState::new(Health::Healthy));
+            self
+        }
+
+        fn host_is_down(mut self, name: &str) -> Self {
+            let id = host_id(name);
+            let state = self.states.entry(id).or_insert_with(|| EntityState::unknown(id));
+            state.set_component(StateComponent::Network, ComponentState::new(Health::Unavailable));
+            state.set_component(StateComponent::Agent, ComponentState::new(Health::Unavailable));
+            self
+        }
+
+        fn observe(mut self, name: &str, probe: &str, status: ProbeStatus) -> Self {
+            self.observations
+                .insert(Observation::new(ProbeId::new(probe), host_id(name), status));
+            self
+        }
+
+        fn evaluate(&self, rule: &dyn DiagnosisRule) -> Vec<Diagnosis> {
+            let context = DiagnosisContext {
+                environment: "lab",
+                inventory: &self.inventory,
+                states: &self.states,
+                observations: &self.observations,
+            };
+            rule.evaluate(&context)
+        }
+    }
+
+    /// Two clients on storage-a, two on storage-b, one fileserver each.
+    fn two_domains() -> World {
+        World::new()
+            .fileserver("fs-a")
+            .fileserver("fs-b")
+            .storage("storage-a", "fs-a")
+            .storage("storage-b", "fs-b")
+            .host("c1")
+            .host("c2")
+            .host("c3")
+            .host("c4")
+            .uses("c1", "storage-a")
+            .uses("c2", "storage-a")
+            .uses("c3", "storage-b")
+            .uses("c4", "storage-b")
+    }
+
+    // --- NFS_SERVICE_FAILURE ---------------------------------------------
+
+    #[test]
+    fn a_fileserver_whose_export_port_is_down_is_diagnosed() {
+        let world = two_domains()
+            .host_is_up("fs-a")
+            .observe("fs-a", PROBE_SERVER_PORT, ProbeStatus::Failed);
+
+        let diagnoses = world.evaluate(&StorageServiceFailure);
+        assert_eq!(diagnoses.len(), 1);
+        assert!(diagnoses[0].is(kind::NFS_SERVICE_FAILURE));
+        assert!(diagnoses[0].summary.contains("is up but"), "{}", diagnoses[0].summary);
+    }
+
+    #[test]
+    fn a_fileserver_exporting_nothing_is_diagnosed() {
+        let world = two_domains()
+            .host_is_up("fs-a")
+            .observe("fs-a", PROBE_SERVER_EXPORTS, ProbeStatus::Failed);
+
+        let diagnoses = world.evaluate(&StorageServiceFailure);
+        assert_eq!(diagnoses.len(), 1);
+        assert!(
+            diagnoses[0].summary.contains("nothing is exported"),
+            "{}",
+            diagnoses[0].summary
+        );
+    }
+
+    #[test]
+    fn an_unreachable_fileserver_is_not_diagnosed_as_a_service_failure() {
+        // The machine is gone; blaming the export service would send someone
+        // to restart a daemon on a host that is not there.
+        let world = two_domains()
+            .host_is_down("fs-a")
+            .observe("fs-a", PROBE_SERVER_PORT, ProbeStatus::Failed);
+        assert!(world.evaluate(&StorageServiceFailure).is_empty());
+    }
+
+    #[test]
+    fn a_healthy_fileserver_is_not_diagnosed() {
+        let world = two_domains()
+            .host_is_up("fs-a")
+            .observe("fs-a", PROBE_SERVER_PORT, ProbeStatus::Ok)
+            .observe("fs-a", PROBE_SERVER_EXPORTS, ProbeStatus::Ok);
+        assert!(world.evaluate(&StorageServiceFailure).is_empty());
+    }
+
+    // --- SHARED_STORAGE_FAILURE ------------------------------------------
+
+    #[test]
+    fn clients_of_one_storage_failing_together_is_a_shared_failure() {
+        // SPEC.md §173.
+        let world = two_domains()
+            .storage_health("c1", Health::Unavailable)
+            .storage_health("c2", Health::Unavailable);
+
+        let diagnoses = world.evaluate(&SharedStorageFailure);
+        assert_eq!(diagnoses.len(), 1, "{diagnoses:#?}");
+
+        let diagnosis = &diagnoses[0];
+        assert!(diagnosis.is(kind::SHARED_STORAGE_FAILURE));
+        assert_eq!(
+            diagnosis.confidence,
+            Confidence::High,
+            "every client of this storage is affected"
+        );
+        assert_eq!(
+            diagnosis.suspected_root_entities,
+            vec![host_id("fs-a")],
+            "the cause is the fileserver"
+        );
+        assert!(diagnosis.affected_entities.contains(&host_id("c1")));
+        assert!(diagnosis.affected_entities.contains(&host_id("c2")));
+        assert!(
+            !diagnosis.affected_entities.contains(&host_id("c3")),
+            "the other domain is untouched"
+        );
+    }
+
+    #[test]
+    fn one_failing_client_is_not_a_shared_failure() {
+        let world = two_domains().storage_health("c1", Health::Unavailable);
+        assert!(
+            world.evaluate(&SharedStorageFailure).is_empty(),
+            "one client is not a pattern"
+        );
+    }
+
+    #[test]
+    fn clients_of_different_storages_failing_is_not_one_shared_failure() {
+        // They share no storage, so there is no single cause to report.
+        let world = two_domains()
+            .storage_health("c1", Health::Unavailable)
+            .storage_health("c3", Health::Unavailable);
+        assert!(world.evaluate(&SharedStorageFailure).is_empty());
+    }
+
+    #[test]
+    fn a_partially_affected_storage_is_reported_with_lower_confidence() {
+        // Two of three clients affected is weaker evidence than all of them.
+        let world = two_domains()
+            .host("c5")
+            .uses("c5", "storage-a")
+            .storage_health("c1", Health::Unavailable)
+            .storage_health("c2", Health::Unavailable);
+
+        let diagnoses = world.evaluate(&SharedStorageFailure);
+        assert_eq!(diagnoses.len(), 1);
+        assert_eq!(diagnoses[0].confidence, Confidence::Medium);
+    }
+
+    #[test]
+    fn a_shared_scheduler_is_not_mistaken_for_shared_storage() {
+        // Every node in a cluster shares a scheduler; that is not a storage
+        // fault, and the rule must only group on storage entities.
+        let mut world = two_domains();
+        world
+            .inventory
+            .insert_entity(ManagedEntity::new("lab", EntityType::Scheduler, "sched"));
+        let scheduler = EntityKey::new("lab", EntityType::Scheduler, "sched").entity_id();
+        for client in ["c1", "c3"] {
+            world.inventory.insert_dependency(DependencyEdge::new(
+                host_id(client),
+                scheduler,
+                DependencyType::UsesScheduler,
+            ));
+        }
+
+        let world = world
+            .storage_health("c1", Health::Unavailable)
+            .storage_health("c3", Health::Unavailable);
+
+        assert!(
+            world.evaluate(&SharedStorageFailure).is_empty(),
+            "sharing a scheduler is not sharing storage"
+        );
+    }
+
+    #[test]
+    fn degraded_clients_count_as_impaired() {
+        // Slow storage is still a shared storage problem.
+        let world = two_domains()
+            .storage_health("c1", Health::Degraded)
+            .storage_health("c2", Health::Degraded);
+        assert_eq!(world.evaluate(&SharedStorageFailure).len(), 1);
+    }
+
+    // --- NFS_CLIENT_FAILURE ----------------------------------------------
+
+    #[test]
+    fn one_impaired_client_among_healthy_peers_is_a_client_local_failure() {
+        // SPEC.md §174, and the mistake that would send someone to reboot a
+        // fileserver five other nodes are happily using.
+        let world = two_domains().storage_health("c1", Health::Unavailable);
+
+        let diagnoses = world.evaluate(&ClientLocalStorageFailure);
+        assert_eq!(diagnoses.len(), 1);
+
+        let diagnosis = &diagnoses[0];
+        assert!(diagnosis.is(kind::NFS_CLIENT_FAILURE));
+        assert_eq!(
+            diagnosis.suspected_root_entities,
+            vec![host_id("c1")],
+            "the client, not the server"
+        );
+        assert!(diagnosis.summary.contains("c2"), "{}", diagnosis.summary);
+    }
+
+    #[test]
+    fn a_client_local_failure_is_never_reported_as_a_shared_one() {
+        // The two rules must partition: an operator told both learns nothing.
+        let world = two_domains().storage_health("c1", Health::Unavailable);
+        assert_eq!(world.evaluate(&ClientLocalStorageFailure).len(), 1);
+        assert!(world.evaluate(&SharedStorageFailure).is_empty());
+    }
+
+    #[test]
+    fn a_shared_failure_is_never_reported_as_client_local() {
+        let world = two_domains()
+            .storage_health("c1", Health::Unavailable)
+            .storage_health("c2", Health::Unavailable);
+        assert_eq!(world.evaluate(&SharedStorageFailure).len(), 1);
+        assert!(
+            world.evaluate(&ClientLocalStorageFailure).is_empty(),
+            "when peers are affected too, it is not client-local"
+        );
+    }
+
+    #[test]
+    fn a_client_with_no_peers_is_not_diagnosed_as_client_local() {
+        // With nothing to compare against, "only this client" is not a claim
+        // the evidence supports.
+        let world = World::new()
+            .fileserver("fs-a")
+            .storage("storage-a", "fs-a")
+            .host("lonely")
+            .uses("lonely", "storage-a")
+            .storage_health("lonely", Health::Unavailable);
+
+        assert!(world.evaluate(&ClientLocalStorageFailure).is_empty());
+    }
+
+    #[test]
+    fn a_stuck_mount_gets_an_extra_investigation_hint() {
+        let world =
+            two_domains()
+                .storage_health("c1", Health::Unavailable)
+                .observe("c1", PROBE_CLIENT_IO, ProbeStatus::Stuck);
+
+        let actions = &world.evaluate(&ClientLocalStorageFailure)[0].recommended_actions;
+        assert!(actions.iter().any(|a| a.contains("stack")), "{actions:?}");
+    }
+
+    #[test]
+    fn storage_diagnoses_never_recommend_changing_anything() {
+        let world = two_domains()
+            .host_is_up("fs-a")
+            .observe("fs-a", PROBE_SERVER_PORT, ProbeStatus::Failed)
+            .storage_health("c1", Health::Unavailable);
+
+        let mut diagnoses = world.evaluate(&StorageServiceFailure);
+        diagnoses.extend(world.evaluate(&ClientLocalStorageFailure));
+        assert!(!diagnoses.is_empty());
+
+        for diagnosis in &diagnoses {
+            for action in &diagnosis.recommended_actions {
+                for mutating in ["restart", "mount ", "umount", "reboot", "exportfs -r"] {
+                    assert!(!action.contains(mutating), "recommended a mutating command: {action}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_healthy_cluster_produces_no_storage_diagnoses() {
+        let world = two_domains().host_is_up("fs-a").host_is_up("fs-b");
+        assert!(world.evaluate(&StorageServiceFailure).is_empty());
+        assert!(world.evaluate(&SharedStorageFailure).is_empty());
+        assert!(world.evaluate(&ClientLocalStorageFailure).is_empty());
+    }
+
+    #[test]
+    fn the_rules_name_no_storage_technology() {
+        // SPEC.md §78: swapping NFS for something else must not need changes
+        // here. The diagnosis *names* are NFS-flavoured for continuity with the
+        // specification, but the logic must not be.
+        let implementation = include_str!("storage.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("implementation");
+        for technology in ["nfsd", "mount -t", "exportfs -o", "rpcbind", "showmount"] {
+            assert!(
+                !implementation.contains(technology),
+                "storage rules must not depend on {technology}"
+            );
+        }
+    }
+}

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Bring the pseudo-cluster up and wait until it is actually usable.
+#
+# "Usable" means more than "the containers started": Slurm must have registered
+# its nodes and the Sentinel agents must have found the controller. Returning
+# before then would make every scenario flaky for reasons that have nothing to
+# do with what is being tested.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+echo "==> building"
+docker compose build "$@"
+
+echo "==> starting"
+docker compose up -d --remove-orphans
+
+exec ./scripts/wait-healthy

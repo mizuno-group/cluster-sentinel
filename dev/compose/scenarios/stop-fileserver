@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Stop the storage service on a fileserver, leaving the host itself up.
+#
+# The point is the distinction between "the fileserver is down" and "the
+# fileserver's export service is down". Only one of those is a machine fault.
+source "$(dirname "$0")/_lib.sh"
+
+target="${1:-filesrv01}"
+require_service "${target}"
+
+announce "stopping the storage service on ${target}"
+supervisor "${target}" stop storage
+
+echo
+echo "The host, SSH and the agent all keep running."
+
+expect "NFS_SERVICE_FAILURE on ${target}" \
+       "SHARED_STORAGE_FAILURE if clients of its storage domain degrade too" \
+       "NOT a host failure: ${target} is answering"

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Undo every scenario and return the cluster to a healthy baseline.
+#
+# Deliberately thorough and idempotent: it is safe to run at any time, and it
+# is what the integration tests call between cases.
+source "$(dirname "$0")/_lib.sh"
+
+announce "recovering the pseudo-cluster"
+
+services=$(docker compose ps --services | grep -v munge-init || true)
+
+echo "-- unpausing"
+for service in ${services}; do
+    if [[ "$(docker inspect -f '{{.State.Paused}}' "sentinel-${service}" 2>/dev/null)" == "true" ]]; then
+        echo "   ${service}"
+        docker compose unpause "${service}" >/dev/null
+    fi
+done
+
+echo "-- starting stopped containers"
+docker compose up -d --no-recreate >/dev/null
+
+echo "-- clearing network partitions"
+for service in ${services}; do
+    docker compose exec -T "${service}" iptables -F 2>/dev/null || true
+done
+
+echo "-- restoring storage health"
+for service in ${services}; do
+    case "${service}" in
+        filesrv*)
+            docker compose exec -T "${service}" sh -c \
+                'printf ok > /var/lib/sentinel/storage-health' 2>/dev/null || true
+            ;;
+    esac
+done
+
+echo "-- restarting stopped processes"
+for service in ${services}; do
+    role="$(role_of "${service}")"
+    docker compose exec -T "${service}" \
+        supervisorctl -c "/etc/supervisor/roles/${role}.conf" start all 2>/dev/null || true
+done
+
+echo "-- returning drained nodes to service"
+for node in compute01 compute02 compute03; do
+    docker compose exec -T controller scontrol update "NodeName=${node}" State=RESUME 2>/dev/null || true
+done
+
+echo
+echo "waiting for the cluster to settle"
+exec ./scripts/wait-healthy

@@ -1,0 +1,48 @@
+# Cluster Sentinel — controller（mutual TLS）
+#
+# 配置先: /etc/sentinel/config.toml
+# 検証:   sudo -u sentinel sentinel config check
+#
+# controller.toml から TLS 部分だけを取り出した最小構成です。
+# entity / dependency の宣言は controller.toml を参照してください。
+#
+# mutual TLS は、cluster credential が漏洩しても耐えられる唯一の構成です。
+# client 証明書を持たない相手は、token を提示することすらできません。
+
+config_version = 1
+environment = "CHANGE-ME-environment"
+
+[controller]
+listen = "0.0.0.0:7443"
+
+[database]
+path = "/var/lib/sentinel/sentinel.db"
+
+[discovery.slurm]
+enabled = true
+
+# ===========================================================================
+# TLS
+#
+# 証明書は既存の PKI で発行してください。Sentinel は生成しません。
+#
+#   cert:      controller の証明書。SAN に agent が接続に使う
+#              名前またはアドレスを必ず含めること
+#   key:       その秘密鍵。0600 で sentinel ユーザーのみ読めるようにする
+#   client_ca: これを書くと client 証明書は「必須」になります。
+#              任意の client 認証は何も守りません（攻撃者は提示しないだけ）
+#
+# 材料が読めない場合、controller は起動に失敗します。
+# 平文で起動して暗号化されていると誤解されるのが最悪の失敗形だからです。
+# ===========================================================================
+[tls]
+cert      = "/etc/sentinel/tls/controller.crt"
+key       = "/etc/sentinel/tls/controller.key"
+client_ca = "/etc/sentinel/tls/ca.crt"
+
+# ===========================================================================
+# 保持期間（既定と異なる値にする場合のみ）
+# ===========================================================================
+[retention]
+observations       = "14d"
+resolved_incidents = "180d"

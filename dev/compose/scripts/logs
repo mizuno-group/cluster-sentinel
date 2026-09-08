@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Show the Sentinel log of one container.
+#
+#   ./scripts/logs compute01          # last 100 lines
+#   ./scripts/logs compute01 -f       # follow
+set -euo pipefail
+cd "$(dirname "$0")/.."
+target="${1:?usage: logs <service> [tail options]}"
+shift
+exec docker compose exec -T "${target}" tail "${@:--n100}" /var/log/supervisor/sentinel.log

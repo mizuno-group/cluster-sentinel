@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# The v1 acceptance sequence (IMPLEMENTATION.md §97), run end to end against
+# the pseudo-cluster.
+#
+# Each step breaks one thing in a known way and checks that Sentinel names
+# that thing and not something else. The negative assertions matter as much as
+# the positive ones: a monitor that says HOST_UNREACHABLE for a stopped daemon
+# is worse than one that says nothing, because it sends someone to the wrong
+# place with confidence.
+set -uo pipefail
+
+cd "$(dirname "$0")/.."
+
+PASSED=0
+FAILED=0
+FAILURES=()
+
+# Slurm's own timeouts mean some steps genuinely take half a minute to become
+# visible. Waiting is part of the test, not a workaround.
+SETTLE="${SETTLE:-15}"
+SLURM_SETTLE="${SLURM_SETTLE:-45}"
+
+step()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+pass()  { printf '   \033[32mPASS\033[0m %s\n' "$*"; PASSED=$((PASSED + 1)); }
+fail()  { printf '   \033[31mFAIL\033[0m %s\n' "$*"; FAILED=$((FAILED + 1)); FAILURES+=("$*"); }
+
+diagnoses() {
+    ./scripts/sentinel diagnose --json 2>/dev/null |
+        python3 -c 'import json,sys
+try:
+    print(" ".join(d["diagnosis_type"] for d in json.load(sys.stdin)))
+except Exception:
+    print("")' 2>/dev/null || echo ""
+}
+
+# Assert a diagnosis appears, polling until a deadline.
+expect_diagnosis() {
+    local wanted="$1" timeout="${2:-$SETTLE}"
+    local deadline=$(( $(date +%s) + timeout ))
+    while (( $(date +%s) < deadline )); do
+        if [[ " $(diagnoses) " == *" ${wanted} "* ]]; then
+            pass "${wanted} detected"
+            return 0
+        fi
+        sleep 3
+    done
+    fail "${wanted} was not detected (saw: $(diagnoses))"
+}
+
+# Assert a diagnosis does NOT appear.
+expect_no_diagnosis() {
+    local unwanted="$1"
+    if [[ " $(diagnoses) " == *" ${unwanted} "* ]]; then
+        fail "${unwanted} was wrongly reported"
+    else
+        pass "${unwanted} correctly not reported"
+    fi
+}
+
+expect_clean() {
+    local timeout="${1:-$SLURM_SETTLE}"
+    local deadline=$(( $(date +%s) + timeout ))
+    while (( $(date +%s) < deadline )); do
+        [[ -z "$(diagnoses)" ]] && { pass "no problems diagnosed"; return 0; }
+        sleep 3
+    done
+    fail "the cluster did not return to clean (saw: $(diagnoses))"
+}
+
+# Poll until no incident is active.
+#
+# Deliberately a poll rather than a single check: a diagnosis clears the moment
+# a probe succeeds, but the state it rests on is debounced and needs several
+# good observations. So an incident correctly sits in RECOVERING for a short
+# while after the fault is fixed -- that lag is the hysteresis working, not a
+# bug, and asserting instantly would be asserting the wrong thing.
+expect_no_active_incidents() {
+    local timeout="${1:-$SLURM_SETTLE}"
+    local deadline=$(( $(date +%s) + timeout ))
+    local active=""
+    while (( $(date +%s) < deadline )); do
+        active=$(./scripts/sentinel incident list --json 2>/dev/null |
+            python3 -c 'import json,sys
+try:
+    print(len(json.load(sys.stdin)))
+except Exception:
+    print(-1)')
+        if [[ "${active}" == "0" ]]; then
+            pass "all incidents resolved"
+            return 0
+        fi
+        sleep 3
+    done
+    fail "${active} incident(s) still active after ${timeout}s"
+}
+
+recover() { ./scenarios/recover-all >/dev/null 2>&1; }
+
+# --- 1-3: startup, registration, baseline ---------------------------------
+step "1-3. Startup, agent registration, healthy baseline"
+if ./scripts/up >/dev/null 2>&1; then
+    pass "pseudo-cluster started and passed its readiness checks"
+else
+    fail "pseudo-cluster did not start"
+    exit 1
+fi
+
+AGENTS=$(curl -fsS http://localhost:17443/v1/health | python3 -c 'import json,sys; print(json.load(sys.stdin)["agents"])')
+if (( AGENTS >= 5 )); then pass "${AGENTS} agents registered"; else fail "only ${AGENTS} agents registered"; fi
+expect_clean
+
+# --- 4-6: Sentinel agent failure ------------------------------------------
+step "4-6. Sentinel agent stopped on compute01"
+./scenarios/stop-agent compute01 >/dev/null 2>&1
+sleep "${SETTLE}"
+expect_diagnosis SENTINEL_AGENT_FAILURE
+expect_no_diagnosis HOST_UNREACHABLE
+recover && expect_clean
+
+# --- 7-9: slurmd failure ---------------------------------------------------
+step "7-9. slurmd stopped on compute01"
+./scenarios/stop-slurmd compute01 >/dev/null 2>&1
+sleep "${SLURM_SETTLE}"
+expect_diagnosis SLURMD_SERVICE_FAILURE "${SLURM_SETTLE}"
+expect_no_diagnosis HOST_UNREACHABLE
+recover && expect_clean
+
+# --- 10-11: Slurm DRAIN ----------------------------------------------------
+step "10-11. compute01 drained in Slurm"
+./scenarios/drain-node compute01 >/dev/null 2>&1
+sleep "${SETTLE}"
+expect_diagnosis SLURM_ONLY_DEGRADATION
+expect_no_diagnosis SLURMD_SERVICE_FAILURE
+recover && expect_clean
+
+# --- 12-13: path-specific network failure ----------------------------------
+step "12-13. controller isolated from compute01 only"
+./scenarios/isolate controller compute01 >/dev/null 2>&1
+sleep "${SLURM_SETTLE}"
+expect_diagnosis PATH_SPECIFIC_NETWORK_FAILURE "${SLURM_SETTLE}"
+expect_no_diagnosis HOST_UNREACHABLE
+recover && expect_clean
+
+# --- host unreachable ------------------------------------------------------
+step "Host stopped entirely (quorum)"
+./scenarios/stop-host compute03 >/dev/null 2>&1
+sleep "${SETTLE}"
+expect_diagnosis HOST_UNREACHABLE
+if ./scripts/sentinel diagnose 2>/dev/null | grep -qi "power"; then
+    fail "a power state was claimed from network evidence"
+else
+    pass "no power state claimed (SPEC.md §52)"
+fi
+recover && expect_clean
+
+# --- 14-15: storage service failure ----------------------------------------
+step "14-15. Storage service stopped on filesrv01"
+./scenarios/stop-fileserver filesrv01 >/dev/null 2>&1
+sleep "${SETTLE}"
+expect_diagnosis NFS_SERVICE_FAILURE
+expect_no_diagnosis HOST_UNREACHABLE
+
+# --- 16-17: recovery and incident resolution -------------------------------
+step "16-17. Recover everything and let incidents resolve"
+recover
+expect_clean
+expect_no_active_incidents
+
+# --- 18: cleanup -----------------------------------------------------------
+step "18. Environment cleanup"
+if ./scripts/down >/dev/null 2>&1; then pass "cluster stopped cleanly"; else fail "cleanup failed"; fi
+
+# --- result ----------------------------------------------------------------
+printf '\n\033[1m%s\033[0m\n' "Result: ${PASSED} passed, ${FAILED} failed"
+if (( FAILED > 0 )); then
+    printf '\nFailures:\n'
+    for failure in "${FAILURES[@]}"; do printf '  - %s\n' "${failure}"; done
+    exit 1
+fi

@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Stop the Sentinel controller, leaving Slurm and every agent running.
+#
+# Agents must keep observing and keep their observations, and hand them over
+# when the controller returns (SPEC.md §176).
+source "$(dirname "$0")/_lib.sh"
+
+announce "stopping the Sentinel controller process"
+supervisor controller stop sentinel-controller
+
+echo
+echo "Slurm and every agent are still running."
+echo "Check that agents are spooling:"
+echo "  docker compose exec compute01 sentinel --config /etc/sentinel/config.toml doctor"
+echo
+echo "Restore with: ./scenarios/recover-all"

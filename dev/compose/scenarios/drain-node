@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Drain a node in Slurm, leaving the machine entirely healthy.
+#
+# This is the case SPEC.md §169 names: host healthy, SSH healthy, agent
+# healthy, slurmd healthy, and the scheduler simply will not use it.
+source "$(dirname "$0")/_lib.sh"
+
+target="${1:-compute01}"
+reason="${2:-sentinel testbed scenario}"
+require_service "${target}"
+
+announce "draining ${target} in Slurm"
+in_container controller scontrol update "NodeName=${target}" State=DRAIN Reason="${reason}"
+in_container controller scontrol show node "${target}" | grep -E 'State=' || true
+
+expect "SLURM_ONLY_DEGRADATION on ${target}" \
+       "Classification: SCHEDULER_DEGRADED" \
+       "NOT a service failure and NOT a host failure"
