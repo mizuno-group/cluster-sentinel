@@ -126,16 +126,18 @@ impl Probe for NfsMountProbe {
             .with_error("no_nfs_mounts", "this host has no NFS mounts");
         }
 
-        // A mount that has gone read-only is how the kernel reports a
-        // filesystem it no longer trusts, and it is a real degradation even
-        // though every syscall still returns promptly.
+        // Recorded as a fact, not judged. `/proc/mounts` says a mount is `ro`;
+        // it does not say why, and the two reasons are opposite in meaning. A
+        // kernel that turned a filesystem read-only after errors is a fault. A
+        // share exported or mounted read-only on purpose -- a dataset, a
+        // reference tree -- is the normal state of many clusters, and calling
+        // it degraded means a permanent false alarm on every node that has
+        // one, which teaches people to ignore the storage component.
+        //
+        // The evidence that distinguishes them is in the kernel log, and the
+        // journal probe already looks for it (`filesystem_readonly`). A
+        // genuine remount is caught there, where there is something to see.
         let read_only: Vec<&MountInfo> = mounts.iter().filter(|m| m.is_read_only()).collect();
-
-        let status = if read_only.is_empty() {
-            ProbeStatus::Ok
-        } else {
-            ProbeStatus::Degraded
-        };
 
         let described: Vec<serde_json::Value> = mounts
             .iter()
@@ -150,22 +152,23 @@ impl Probe for NfsMountProbe {
             })
             .collect();
 
-        let observation = Observation::new(PROBE_CLIENT_MOUNT.into(), context.target_entity, status).with_payload(
-            serde_json::json!({
+        let observation = Observation::new(PROBE_CLIENT_MOUNT.into(), context.target_entity, ProbeStatus::Ok)
+            .with_payload(serde_json::json!({
                 "mounts": described,
                 "mount_count": mounts.len(),
                 "read_only_count": read_only.len(),
                 "servers": mounts.iter().filter_map(|m| m.nfs_server()).collect::<Vec<_>>(),
-            }),
-        );
+            }));
 
         if read_only.is_empty() {
             observation
         } else {
-            observation.with_error(
-                "mount_read_only",
-                format!(
-                    "{} mount(s) have been remounted read-only: {}",
+            // Stated, not diagnosed: "is" rather than "has been remounted",
+            // because the probe cannot see which happened.
+            observation.with_evidence(serde_json::json!({
+                "read_only_mounts": read_only.iter().map(|m| m.target.clone()).collect::<Vec<_>>(),
+                "note": format!(
+                    "{} mount(s) are read-only: {}",
                     read_only.len(),
                     read_only
                         .iter()
@@ -173,7 +176,7 @@ impl Probe for NfsMountProbe {
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-            )
+            }))
         }
     }
 }
@@ -375,18 +378,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_mount_remounted_read_only_is_degraded() {
-        // How the kernel reports a filesystem it no longer trusts. Every
-        // syscall still returns promptly, so only the options reveal it.
-        let (_dir, path) = mounts_file("fs-a:/export/home /home nfs4 ro,relatime 0 0\n");
+    async fn a_read_only_mount_is_recorded_but_not_called_a_fault() {
+        // `/proc/mounts` says a mount is read-only; it does not say why, and
+        // the two reasons are opposite in meaning. A share exported read-only
+        // on purpose is the normal state of many clusters, and degrading on it
+        // is a permanent false alarm. A kernel that flipped one after errors
+        // is caught by the journal probe, where there is evidence to see.
+        let (_dir, path) = mounts_file("fs1:/data /data nfs4 ro,vers=4.2 0 0\n");
         let observation = NfsMountProbe::new()
             .with_mounts_path(&path)
             .collect(&context(serde_json::Value::Null))
             .await;
 
-        assert_eq!(observation.status, ProbeStatus::Degraded);
+        assert_eq!(observation.status, ProbeStatus::Ok);
         assert_eq!(observation.payload["read_only_count"], 1);
-        assert_eq!(observation.error_code.as_deref(), Some("mount_read_only"));
+        assert!(
+            observation.evidence["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("/data"),
+            "the fact must still be recorded: {:?}",
+            observation.evidence
+        );
     }
 
     #[tokio::test]

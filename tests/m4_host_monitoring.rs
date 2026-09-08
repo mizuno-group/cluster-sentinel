@@ -419,6 +419,31 @@ ports = {{ ssh = {ssh_port} }}
 }
 
 #[tokio::test]
+async fn reachability_asks_the_configured_ssh_port_not_22() {
+    // The fault this exists to prevent, seen on a real cluster: SSH moved to
+    // a high port, a firewall dropping (not refusing) on 22, and thirteen
+    // healthy hosts reported unreachable because the reachability probe asked
+    // 22 anyway and timed out.
+    let (ssh_port, _ssh) = ssh_server().await;
+
+    let mut entity = ManagedEntity::new("lab", EntityType::Host, "node-a")
+        .with_capabilities(CapabilitySet::from_iter(["network.tcp", "ssh.server"]));
+    entity.metadata = serde_json::json!({
+        "host": { "addresses": ["127.0.0.1"] },
+        "ports": { "ssh": ssh_port },
+    });
+
+    let observations = RemoteObserver::new().observe(&entity).await;
+    let reachability = observations
+        .iter()
+        .find(|o| o.probe_id.as_str() == sentinel::probes::network::PROBE_ID)
+        .expect("the reachability probe ran");
+
+    assert_eq!(reachability.payload["port"], ssh_port);
+    assert_eq!(reachability.status, ProbeStatus::Ok);
+}
+
+#[tokio::test]
 async fn without_the_configured_port_the_probe_goes_to_the_default() {
     // The counter-example that shows the previous test is testing something:
     // with no port declared, the probe asks the default port, which is not

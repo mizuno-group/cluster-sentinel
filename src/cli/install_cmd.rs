@@ -256,6 +256,10 @@ pub fn setup_instructions(role: &str, written: &[Written], credential_generated:
             "sudo useradd --system --no-create-home --shell /usr/sbin/nologin sentinel".into(),
             format!("sudo install -d -o sentinel -g sentinel -m 0750 {DEFAULT_STATE_DIR}"),
             "sudo chown -R sentinel:sentinel /etc/sentinel".into(),
+            // Without this the journal probe reports UNSUPPORTED on a host
+            // that has a perfectly readable journal, and the kernel events it
+            // exists to preserve are never collected.
+            "sudo usermod -aG systemd-journal sentinel   # journal.events を有効にする".into(),
         ],
     );
 

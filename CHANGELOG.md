@@ -20,6 +20,28 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.5
+
+* **到達性 probe が SSH ポートを無視して 22 番に固定されていた**（バグ修正）。
+  SSH を 22 以外に移し、22 番を firewall で DROP している環境では、
+  **健全な host が到達不能と報告される。** 実クラスタで 13 台が該当した。
+  22 番が REJECT を返す host だけが「到達可能」と判定され、
+  同じクラスタ内で結果が割れていた。
+  probe は `ports.ssh`（agent が `sshd_config` から自動検出して報告する値）を
+  優先して叩くようになった。refusal を成功とみなす点は変わらない。
+* **`sentinel` ユーザーが `systemd-journal` group に入っていなかった。**
+  journal が読めるホストでも `journal.events` が UNSUPPORTED になり、
+  kernel event が一切収集されていなかった。
+  `install` の案内と Ansible ロールの両方で group に追加する。
+* **read-only な NFS mount を「劣化」と判定しなくなった**（誤検知の修正）。
+  `/proc/mounts` の `ro` は「読み取り専用である」ことしか示さず、
+  「読み取り専用に落ちた」かどうかは分からない。意図的に ro で
+  export / mount している共有は珍しくなく、それを常時 DEGRADED と
+  報告するのは恒久的な誤警報で、storage component 全体が信用されなくなる。
+  事実として記録するだけにした。**本当に kernel が ro に落とした場合は
+  journal probe（`filesystem_readonly`）が捉える。**
+* `docs/DEPLOYMENT.md` に firewall で開けるポートの節を追加。
+
 ## v0.3.4
 
 Ansible ロールのみの変更です。バイナリに変更はありません。

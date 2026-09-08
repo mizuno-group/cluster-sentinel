@@ -131,6 +131,12 @@ pub struct TcpProbe {
     definition: ProbeDefinition,
     default_port: u16,
     refusal_is_reachable: bool,
+    /// Probe parameters consulted for a port, in order of preference.
+    ///
+    /// Reachability asks for the host's SSH port before falling back to the
+    /// default, because that is a port something is known to be listening on.
+    /// See [`TcpProbe::reachability`].
+    port_parameters: &'static [&'static str],
 }
 
 impl TcpProbe {
@@ -146,6 +152,7 @@ impl TcpProbe {
                 .mode(ExecutionMode::Either),
             default_port,
             refusal_is_reachable: false,
+            port_parameters: &["port"],
         }
     }
 
@@ -167,9 +174,21 @@ impl TcpProbe {
     /// healthy without anyone ever having contacted it. Capabilities gate
     /// probes that need something *present* (`nvidia-smi`, `journalctl`, an
     /// NFS export). Reachability is not one of them.
+    /// It asks the host's **configured SSH port**, not port 22.
+    ///
+    /// Aiming at 22 regardless is only harmless where nothing is listening
+    /// there and the kernel refuses, which reads as reachable. Where a
+    /// firewall drops instead of refusing -- the ordinary configuration on a
+    /// cluster that has moved SSH elsewhere -- the probe times out and a
+    /// perfectly reachable host is reported unreachable. A whole cluster was.
+    ///
+    /// So it asks a port something is known to answer on. That is still a
+    /// different question from the SSH probe's, which wants a banner: a
+    /// refusal here is success, because a refusal is a packet.
     pub fn reachability() -> Self {
         Self {
             refusal_is_reachable: true,
+            port_parameters: &["ssh_port", "port"],
             definition: ProbeDefinition::new(PROBE_ID)
                 .targeting([EntityType::Host])
                 .every(Duration::from_secs(5))
@@ -212,7 +231,11 @@ impl Probe for TcpProbe {
             )
             .with_error("no_address", "no address is known for this entity");
         };
-        let port = context.parameter_u64("port").unwrap_or(self.default_port as u64) as u16;
+        let port = self
+            .port_parameters
+            .iter()
+            .find_map(|name| context.parameter_u64(name))
+            .unwrap_or(self.default_port as u64) as u16;
 
         let outcome = connect(address, port, context.timeout).await;
         let latency_ms = match &outcome {

@@ -845,6 +845,22 @@ TLS 材料が読めない場合、controller は**起動に失敗します**。
 詳細は [SECURITY.md](SECURITY.md) と
 [CONFIGURATION.md](CONFIGURATION.md) の `[tls]` を参照してください。
 
+### 9.6.5 firewall で開けるポート
+
+peer 同士が観測しあうため、**ノード間**で以下が通る必要があります。
+
+| ポート | 用途 | 開けないとどうなるか |
+| --- | --- | --- |
+| SSH のポート（22 とは限らない） | 到達性 probe と SSH probe | host が到達不能に見える |
+| **7444** | agent の health endpoint | `agent` component が UNAVAILABLE のまま |
+| 7443（→ controller のみ） | agent からの報告 | agent が登録できない |
+
+**DROP ではなく REJECT にするか、明示的に許可してください。**
+DROP された場合、probe は timeout と区別できません。
+
+到達性 probe は**設定済みの SSH ポート**を叩きます（22 固定ではありません）。
+agent が `sshd_config` から自動検出して報告するので、通常は設定不要です。
+
 ### 9.7 NIC が複数ある場合（VLAN・bridge・複数 fabric）
 
 peer がこの host を probe するアドレスは、agent が自動検出します。

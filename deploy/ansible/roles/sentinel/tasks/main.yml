@@ -182,6 +182,11 @@
     system: true
     create_home: false
     shell: /usr/sbin/nologin
+    # Without this the journal probe reports UNSUPPORTED on a host whose
+    # journal is perfectly readable, and the kernel events it exists to
+    # preserve -- I/O errors, hung tasks, OOM -- are never collected.
+    groups: "{{ sentinel_user_groups }}"
+    append: true
 
 # Checked here rather than left to fail inside `install`, where an old binary
 # reports it as an unknown argument -- an error about command-line parsing,

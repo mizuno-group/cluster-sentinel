@@ -17,6 +17,25 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.5 での修正
+
+**実クラスタで見つかった誤検知 2 件です。バイナリの更新が必要です。**
+
+* **到達性 probe が SSH ポートを無視して 22 番に固定されていました。**
+  SSH を 22 以外に移し、22 番を firewall で DROP している環境では、
+  **健全な host が到達不能と報告されます。**
+  22 番が REJECT を返す host だけが到達可能と判定され、
+  同じクラスタ内で結果が割れていました。
+  agent が `sshd_config` から検出して報告する `ports.ssh` を優先します。
+* **read-only な NFS mount を劣化と判定していました。**
+  `ro` は「読み取り専用である」ことしか示さず、意図的な ro 共有を
+  常時 DEGRADED と報告していました。事実として記録するだけにしました
+  （本当に kernel が落とした場合は journal probe が捉えます）。
+* `sentinel` ユーザーを `systemd-journal` group に入れる案内を追加。
+  無いと `journal.events` が UNSUPPORTED になり、kernel event が
+  一切収集されません。
+* firewall で開けるポート（SSH のポート、7444、7443）を文書化。
+
 ## v0.3.4 での変更
 
 **Ansible ロールのみの変更です。バイナリに変更はありません。**
