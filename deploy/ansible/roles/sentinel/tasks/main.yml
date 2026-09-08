@@ -100,13 +100,27 @@
     cmd: "{{ sentinel_binary_path }} install agent --binary {{ sentinel_binary_path }}"
     creates: /etc/systemd/system/sentinel-agent.service
 
+# Read once, on the controller, as root. The credential is mode 0400 owned by
+# the service user, so the operator running ansible-playbook cannot read it
+# themselves -- `copy: src:` would fail with permission denied on the control
+# node, which reads as a problem with the managed host and is not.
+- name: Read the cluster credential from the controller
+  ansible.builtin.slurp:
+    src: "{{ sentinel_token_source }}"
+  delegate_to: localhost
+  become: true
+  run_once: true
+  register: sentinel_token
+  no_log: true
+
 - name: The cluster credential is in place
   ansible.builtin.copy:
-    src: "{{ sentinel_token_source }}"
+    content: "{{ sentinel_token.content | b64decode }}"
     dest: "{{ sentinel_config_dir }}/token"
     owner: "{{ sentinel_user }}"
     group: "{{ sentinel_user }}"
     mode: "0400"
+  no_log: true
   notify: Restart sentinel-agent
 
 # Written from a template rather than edited in place, so a node's
@@ -131,9 +145,14 @@
 
 # Before starting, not after. A node that fails to start because of a typo is
 # worth catching here, where the message names the setting.
-- name: The configuration is valid
-  ansible.builtin.command: "{{ sentinel_binary_path }} --config {{ sentinel_config_dir }}/config.toml config check"
-  become_user: "{{ sentinel_user }}"
+# As the service user, not as root: root can read anything, so a check that
+# passed as root would say nothing about whether the daemon can read its own
+# configuration. `runuser` rather than Ansible's become_user, which needs ACLs
+# or world-readable temporary files to drop to an unprivileged account.
+- name: The configuration is valid, as the service user sees it
+  ansible.builtin.command: >-
+    runuser -u {{ sentinel_user }} --
+    {{ sentinel_binary_path }} --config {{ sentinel_config_dir }}/config.toml config check
   changed_when: false
 
 - name: The agent is running and enabled
@@ -146,8 +165,9 @@
 # The address is the one thing this role cannot get right on its own, so it is
 # reported rather than assumed.
 - name: What this host will report itself as
-  ansible.builtin.command: "{{ sentinel_binary_path }} --config {{ sentinel_config_dir }}/config.toml doctor --json"
-  become_user: "{{ sentinel_user }}"
+  ansible.builtin.command: >-
+    runuser -u {{ sentinel_user }} --
+    {{ sentinel_binary_path }} --config {{ sentinel_config_dir }}/config.toml doctor --json
   register: sentinel_doctor
   changed_when: false
 

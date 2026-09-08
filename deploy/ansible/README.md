@@ -14,6 +14,79 @@
 * controller 側で `sentinel install controller` が済んでおり、
   `/etc/sentinel/token` が存在する
 
+## パスワードが必要な場合
+
+SSH にも `sudo` にもパスワードが要る、という環境は珍しくありません。両方扱えます。
+
+```bash
+ansible-playbook -i inventory.ini site.yml --ask-pass --ask-become-pass
+```
+
+| オプション | 何のパスワードか | 備考 |
+| --- | --- | --- |
+| `--ask-pass` | SSH ログイン | `sshpass` が必要（`apt install sshpass`） |
+| `--ask-become-pass`（`-K`） | `sudo` | |
+
+実行開始時に 1 回ずつ聞かれ、以降は全ノードで使い回されます。
+**全ノードで同じパスワードであることが前提**です。
+
+### SSH は鍵にすることを強く推奨します
+
+パスワード認証は毎タスクで使われるうえ、`sshpass` は
+Ansible 公式が非推奨としており、`PasswordAuthentication no` の環境では
+そもそも使えません。**鍵を配るのは 1 回で済みます。**
+
+```bash
+ssh-keygen -t ed25519 -C "ansible@controller"    # まだ無ければ
+for n in node01 node02 node03; do ssh-copy-id "$n"; done
+```
+
+これで `--ask-pass` が不要になり、`sudo` のパスワードだけになります。
+
+```bash
+ansible-playbook -i inventory.ini site.yml -K
+```
+
+### sudo もパスワード無しにする場合
+
+これは各サイトのセキュリティ方針次第です。行うなら、
+**このロールが使うコマンドだけに限定**してください。
+
+```
+# /etc/sudoers.d/ansible-sentinel
+%wheel ALL=(ALL) NOPASSWD: /usr/local/bin/sentinel
+```
+
+全 `sudo` を NOPASSWD にする必要はありません。
+
+### ノードごとにパスワードが違う場合
+
+`--ask-pass` は 1 つしか受け付けません。`ansible-vault` で
+ホスト変数として持たせてください。
+
+```bash
+ansible-vault create host_vars/node01.yml
+```
+
+```yaml
+ansible_password: "..."
+ansible_become_password: "..."
+```
+
+```bash
+ansible-playbook -i inventory.ini site.yml --ask-vault-pass
+```
+
+**平文の `inventory.ini` にパスワードを書かないでください。**
+このリポジトリに commit されます。
+
+### credential の読み取りについて
+
+`/etc/sentinel/token` は mode 0400、`sentinel` ユーザー所有です。
+ロールは **controller 上で root として読み取り**、各ノードへ配ります
+（`slurp` + `become: true` + `delegate_to: localhost`）。
+`-K` を渡していれば、この読み取りにもそのパスワードが使われます。
+
 ## 使い方
 
 ```bash

@@ -462,6 +462,17 @@ ansible-playbook -i inventory.ini site.yml --limit node01   # まず 1 台
 ansible-playbook -i inventory.ini site.yml
 ```
 
+SSH と `sudo` にパスワードが必要な場合:
+
+```bash
+ansible-playbook -i inventory.ini site.yml --ask-pass --ask-become-pass
+```
+
+`--ask-pass` には `sshpass` が必要です。**SSH は鍵にしておくことを推奨します**
+（`ssh-copy-id` を 1 回。パスワード認証は毎タスクで使われ、
+`PasswordAuthentication no` の環境では使えません）。
+詳細は [deploy/ansible/README.md](../deploy/ansible/README.md) を参照してください。
+
 Sentinel 側に Ansible 固有のものはありません。別の構成管理ツールなら、
 同じ手順（バイナリを置く → `sentinel install agent` → 設定と credential を配る）
 を移植してください。
