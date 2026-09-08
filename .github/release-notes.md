@@ -17,6 +17,19 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.2 での修正
+
+* **`sentinel install --force` が cluster credential を上書きしなくなりました。**
+  `--force` を実行する理由は、多くの場合 systemd unit の更新を取り込むことです。
+  それが credential を再生成していたため、**アップグレードのつもりで実行すると
+  全 agent が一斉に締め出されていました。** 失敗は後から各ノードの認証エラーとして
+  現れるため、原因に辿り着きにくい形でした。
+  意図的な更新は、ファイルを削除して `install` を実行し、全 host に配り直します。
+* アップグレード手順を [OPERATIONS.md](docs/OPERATIONS.md) に具体化しました
+  （置き換え前の `config check`、controller → agent の順序、
+  unit が変わった場合、切り戻し）。
+* Ansible ロールが SSH / `sudo` のパスワード認証環境で動くようになりました。
+
 ## v0.3.1 での修正
 
 **v0.3.0 には、実機で問題になる不具合が含まれています。更新を推奨します。**

@@ -20,7 +20,16 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
-## 未リリース
+## v0.3.2
+
+* **`install --force` が credential を上書きしなくなった**（バグ修正）。
+  unit を更新するために `--force` を実行すると、cluster credential が
+  再生成され、**全 agent が一斉に締め出されていた。**
+  「ファイルを書き直す」という意味の flag が巻き込んでよい対象ではない。
+  意図的な更新は、ファイルを削除してから `install` を実行する。
+* アップグレード手順を `docs/OPERATIONS.md` に具体化
+  （バイナリ入れ替え、順序、unit 更新時、切り戻し）。
+* Ansible ロールが SSH / sudo のパスワード認証環境で動くように。
 
 M0-M10（core scope）完了。
 CLI からクラスタ状態と障害原因を説明できる状態です。

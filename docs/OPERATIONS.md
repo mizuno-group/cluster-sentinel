@@ -280,12 +280,74 @@ sqlite3 /var/lib/sentinel/sentinel.db ".backup /path/to/backup/sentinel.db"
 
 ## アップグレード
 
-1. `sentinel config check` を新バイナリで実行する
-2. controller を先に更新する
-3. agent を順次更新する
+**controller を先に、agent を後に。** binary version と protocol version は
+分離されているので、同一 protocol version であれば混在状態でも動きます。
 
-binary version と protocol version は分離されています。
-同一 protocol version であれば、混在状態でも動作します。
+新しいバイナリを置いて再起動する、それだけです。設定・database・credential
+はそのまま残ります。database の migration は controller の起動時に自動で
+適用されます。
+
+### 1. controller
+
+```bash
+# 新しいバイナリを取得して検証
+curl -fsSLO https://github.com/mizuno-group/cluster-sentinel/releases/latest/download/sentinel-x86_64-unknown-linux-musl
+curl -fsSLO https://github.com/mizuno-group/cluster-sentinel/releases/latest/download/sentinel-x86_64-unknown-linux-musl.sha256
+sha256sum -c sentinel-x86_64-unknown-linux-musl.sha256
+
+# 置き換える前に、今の設定が新バイナリで通ることを確認
+sudo -u sentinel ./sentinel-x86_64-unknown-linux-musl \
+  --config /etc/sentinel/config.toml config check
+
+sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
+sudo systemctl restart sentinel-controller
+sentinel version
+systemctl status sentinel-controller
+```
+
+### 2. agent（各ノード）
+
+controller が動いていることを確認してから、同じ手順を各ノードで行います。
+ノードが多い場合は [Ansible ロール](../deploy/ansible/)
+の `sentinel_version` を変えて再実行してください。
+
+```bash
+ansible-playbook -i inventory.ini site.yml -e sentinel_version=v0.3.1 -K
+```
+
+agent が止まっている間の観測は spool に溜まり、復帰後に送られます。
+
+### systemd unit が更新された場合
+
+リリースノートに unit の変更が書かれている場合のみ必要です。
+
+```bash
+sudo sentinel install controller --force    # または agent
+sudo systemctl daemon-reload
+sudo systemctl restart sentinel-controller
+```
+
+**`--force` は設定ファイルと unit を上書きします。** 設定を手で調整している
+場合は、先に控えを取ってください。
+
+```bash
+sudo cp /etc/sentinel/config.toml /etc/sentinel/config.toml.bak
+```
+
+**credential は `--force` でも上書きされません。** 入れ替わると全 agent が
+一斉に締め出されるため、「ファイルを書き直す」という意味の flag が
+巻き込んでよい対象ではないからです。意図的に更新する場合は、
+ファイルを削除してから `install` を実行し、**全 host に配り直してください。**
+
+### 切り戻し
+
+前のバイナリに戻して再起動するだけです。database schema は後方互換であり、
+新しいバージョンが適用した migration が古いバイナリを壊すことはありません。
+
+```bash
+sudo install -m 0755 /path/to/previous/sentinel /usr/local/bin/sentinel
+sudo systemctl restart sentinel-controller
+```
 
 ## v1 で行わないこと
 

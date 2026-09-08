@@ -14,7 +14,9 @@
 //! The credential is written to a file, never passed on a command line or
 //! through the environment of a unit someone might paste into a bug report.
 //! Nothing that already exists is overwritten without `--force`, so running
-//! `install` twice is safe.
+//! `install` twice is safe -- and an existing credential is never overwritten
+//! at all, because rotating one locks out every agent in the cluster and is
+//! not something a flag meaning "write my files again" should do.
 
 use std::path::{Path, PathBuf};
 
@@ -378,16 +380,30 @@ pub fn run(role: &str, output_dir: &Path, config: &Path, options: Options<'_>) -
 
     // Only the controller generates one. An agent that generated its own would
     // produce a credential nothing else in the cluster knows.
+    //
+    // `--force` deliberately does not reach this file. Its purpose is "write
+    // my files again", and someone upgrading runs it to pick up a new unit.
+    // If it rotated the credential too, that upgrade would lock every agent in
+    // the cluster out at once, from a flag that said nothing about
+    // credentials. Rotating one is a separate act with cluster-wide
+    // consequences: delete the file and run `install` again.
     let mut credential_generated = false;
     if parsed == crate::cli::generate::Role::Controller && options.credential {
         let token_file = token_path(config);
-        let existing = token_file.exists();
-        let token = if existing && !options.force {
-            String::new()
-        } else {
-            generate_credential()?
+        let keep_existing = Options {
+            force: false,
+            ..options
         };
-        let entry = place(&token_file, &format!("{token}\n"), Some(0o400), options)?;
+        let entry = if token_file.exists() {
+            place(&token_file, "", Some(0o400), keep_existing)?
+        } else {
+            place(
+                &token_file,
+                &format!("{}\n", generate_credential()?),
+                Some(0o400),
+                keep_existing,
+            )?
+        };
         credential_generated = entry.outcome != Outcome::Kept;
         written.push(entry);
     }
@@ -653,6 +669,46 @@ mod tests {
             std::fs::read_to_string(token_path(&sandbox.config())).expect("token"),
             token
         );
+    }
+
+    #[test]
+    fn force_does_not_rotate_an_existing_credential() {
+        // The upgrade footgun: someone re-runs install with --force to pick up
+        // a new unit, and every agent in the cluster is locked out by a flag
+        // that said nothing about credentials.
+        let sandbox = Sandbox::new();
+        sandbox.install("controller", Options::default()).expect("first");
+        let token = std::fs::read_to_string(token_path(&sandbox.config())).expect("token");
+
+        let options = Options {
+            force: true,
+            ..Options::default()
+        };
+        sandbox.install("controller", options).expect("second");
+
+        assert_eq!(
+            std::fs::read_to_string(token_path(&sandbox.config())).expect("token"),
+            token,
+            "--force rotated the cluster credential"
+        );
+    }
+
+    #[test]
+    fn force_still_replaces_the_unit_and_the_configuration() {
+        // Which is what it is for: an upgrade picks up a unit with new
+        // directives without the operator editing it by hand.
+        let sandbox = Sandbox::new();
+        sandbox.install("controller", Options::default()).expect("first");
+        std::fs::write(sandbox.config(), "replaced by hand\n").expect("edit");
+
+        let options = Options {
+            force: true,
+            ..Options::default()
+        };
+        sandbox.install("controller", options).expect("second");
+
+        let config = std::fs::read_to_string(sandbox.config()).expect("config");
+        assert!(config.contains("[controller]"), "{config}");
     }
 
     #[test]
