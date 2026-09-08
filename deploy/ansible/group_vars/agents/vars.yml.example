@@ -1,0 +1,12 @@
+---
+# ノードごとに sudo パスワードが違う場合にだけ必要です。
+#
+#   cp group_vars/agents/vars.yml.example group_vars/agents/vars.yml
+#
+# **vault.yml を作らずにこのファイルを置くと、playbook は起動しません**
+# （`vault_become_passwords` が未定義になるため）。両方作るか、両方作らないかです。
+#
+# 2 ファイルに分けるのは Ansible の慣習です。暗号化ファイルは `git diff` でも
+# `grep` でも中身が見えないので、「どの変数がどこから来るのか」を
+# 平文側に残しておくと後で読めます。
+ansible_become_password: "{{ vault_become_passwords[inventory_hostname] }}"

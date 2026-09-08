@@ -1,7 +1,0 @@
----
-# 平文で置いてよい部分。暗号化ファイル側の値を参照するだけです。
-#
-# 2 ファイルに分けるのは Ansible の慣習です。暗号化ファイルは
-# `git diff` でも `grep` でも中身が見えないので、「どの変数が
-# どこから来るのか」を平文側に残しておくと後で読めます。
-ansible_become_password: "{{ vault_become_passwords[inventory_hostname] }}"

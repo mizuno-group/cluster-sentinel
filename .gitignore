@@ -10,5 +10,6 @@ tests/deployment-names.txt
 
 # Ansible vault: 暗号化前に誤って commit されるのを防ぐ。
 deploy/ansible/group_vars/*/vault.yml
+deploy/ansible/group_vars/*/vars.yml
 deploy/ansible/host_vars/
 deploy/ansible/inventory.ini

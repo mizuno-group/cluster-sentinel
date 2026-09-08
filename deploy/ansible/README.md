@@ -107,11 +107,16 @@ ansible-playbook -i inventory.ini site.yml -K
 **ただしノード 1 台につき 1 ファイル作る必要はありません。**
 暗号化ファイル 1 つに全ノード分を辞書で持たせます。
 
-`group_vars/agents/vars.yml`（平文、commit してよい）:
+`group_vars/agents/vars.yml`（平文）:
 
 ```yaml
 ansible_become_password: "{{ vault_become_passwords[inventory_hostname] }}"
 ```
+
+**この 2 つは両方作るか、両方作らないかです。** `vars.yml` だけ置くと
+`vault_become_passwords` が未定義になり、playbook は最初のタスクで止まります。
+そのためリポジトリには `.example` として置いてあり、
+既定では**どちらも存在しません**（vault を使わない環境はそのまま動きます）。
 
 `group_vars/agents/vault.yml`（暗号化）:
 
@@ -125,6 +130,7 @@ vault_become_passwords:
 作り方:
 
 ```bash
+cp group_vars/agents/vars.yml.example  group_vars/agents/vars.yml
 cp group_vars/agents/vault.yml.example group_vars/agents/vault.yml
 $EDITOR group_vars/agents/vault.yml          # 実際のパスワードを書く
 ansible-vault encrypt group_vars/agents/vault.yml
