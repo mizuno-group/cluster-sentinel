@@ -17,6 +17,27 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.3 での変更
+
+**切り分け用のコマンドが増えました。**
+
+```bash
+sentinel entity observations <name>            # 誰が何を見たか
+sentinel entity observations <name> --probe network.tcp --limit 100
+```
+
+state や diagnosis ではなく、**生の観測**を表示します。
+時刻 / probe / **observer** / status / アドレスと失敗理由。
+「SSH は通るのに到達不能」のような一見矛盾した状態は、
+観測者ごとに結果が違うだけであることが多く、observer 列で判別できます。
+
+* `entity show` が probe 先アドレスと、その決まり方
+  （agent の報告か、entity 名からの解決か）を表示します。
+* `doctor` の credential 判定が環境変数しか見ておらず、
+  正常な host でも `NOT CONFIGURED` と表示されていました。
+* **Ansible ロールが v0.3.0 を配っていました**（`sentinel_version` の更新漏れ）。
+  リポジトリの版と一致していないとテストが落ちるようにしました。
+
 ## v0.3.2 での修正
 
 * **`sentinel install --force` が cluster credential を上書きしなくなりました。**

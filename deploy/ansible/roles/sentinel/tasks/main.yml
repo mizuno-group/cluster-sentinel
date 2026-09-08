@@ -23,15 +23,20 @@
 
 # The release carries one binary per architecture, and a cluster that has
 # grown over time has both.
+# Per host, not per run. A cluster that has grown over time has both, and
+# the release publishes one binary for each. Checked before the name is
+# built, so an architecture nobody publishes fails saying so rather than
+# quietly asking for a file that does not exist.
+- name: This architecture is one the release publishes
+  ansible.builtin.assert:
+    that: ansible_architecture in sentinel_artefacts
+    fail_msg: >-
+      {{ inventory_hostname }} is {{ ansible_architecture }}, and the release
+      publishes only {{ sentinel_artefacts.keys() | list | join(', ') }}.
+
 - name: Work out which release artefact this host needs
   ansible.builtin.set_fact:
-    sentinel_artefact: >-
-      sentinel-{{ 'x86_64' if ansible_architecture == 'x86_64' else 'aarch64' }}-unknown-linux-musl
-
-- name: This architecture is one we publish
-  ansible.builtin.assert:
-    that: ansible_architecture in ['x86_64', 'aarch64']
-    fail_msg: "unsupported architecture: {{ ansible_architecture }}"
+    sentinel_artefact: "{{ sentinel_artefacts[ansible_architecture] }}"
 
 - name: What is installed already, if anything
   ansible.builtin.command: "{{ sentinel_binary_path }} version"
@@ -85,12 +90,31 @@
     - "{{ sentinel_artefact }}.sha256"
 
 # Before `install`, so the files it writes can be handed straight over.
+- name: What is installed now
+  ansible.builtin.command: "{{ sentinel_binary_path }} version"
+  register: sentinel_present
+  changed_when: false
+
 - name: The service user exists
   ansible.builtin.user:
     name: "{{ sentinel_user }}"
     system: true
     create_home: false
     shell: /usr/sbin/nologin
+
+# Checked here rather than left to fail inside `install`, where an old binary
+# reports it as an unknown argument -- an error about command-line parsing,
+# which says nothing about the version being wrong.
+- name: The installed binary is new enough for this role
+  ansible.builtin.assert:
+    that:
+      - installed_version is version(sentinel_minimum_version, ">=")
+    fail_msg: >-
+      {{ sentinel_binary_path }} is {{ installed_version }}, and this role needs
+      {{ sentinel_minimum_version }} or newer. Set sentinel_version to a release
+      of at least v{{ sentinel_minimum_version }} and run again.
+  vars:
+    installed_version: "{{ (sentinel_present.stdout | default('sentinel 0.0.0')).split('\n')[0].split(' ')[1] }}"
 
 # `install` creates /etc/sentinel and writes a unit and a configuration. It
 # never overwrites, so running this playbook again is safe: a node whose

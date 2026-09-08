@@ -170,6 +170,63 @@ pub async fn agent(cli: &Cli) -> anyhow::Result<i32> {
     Ok(0)
 }
 
+/// Whether a cluster credential is reachable, and from where.
+///
+/// The environment is not the whole answer, and reporting only on it told
+/// operators their credential was missing while the daemon beside them was
+/// using it perfectly well: the daemon gets the path from its unit, and an
+/// interactive shell has no such variable. The file the unit would name is
+/// checked too, so `doctor` describes the host rather than the shell it
+/// happens to be running in.
+fn credential_status(config: &std::path::Path) -> (bool, String) {
+    credential_status_from(
+        std::env::var(CREDENTIAL_ENV).ok(),
+        std::env::var(CREDENTIAL_FILE_ENV).ok(),
+        config,
+    )
+}
+
+/// [`credential_status`] with the environment passed in.
+///
+/// The environment is process-wide, so a test that set it would decide the
+/// answer for every other test running beside it.
+fn credential_status_from(
+    env_token: Option<String>,
+    env_file: Option<String>,
+    config: &std::path::Path,
+) -> (bool, String) {
+    if env_token.is_some() {
+        return (true, format!("configured ({CREDENTIAL_ENV})"));
+    }
+    if let Some(path) = env_file {
+        let readable = std::fs::metadata(&path).is_ok();
+        return (
+            readable,
+            if readable {
+                format!("configured ({path})")
+            } else {
+                format!("NOT CONFIGURED ({CREDENTIAL_FILE_ENV} points at {path}, which cannot be read)")
+            },
+        );
+    }
+
+    let beside_config = crate::cli::install_cmd::token_path(config);
+    match std::fs::metadata(&beside_config) {
+        Ok(_) => (true, format!("configured ({})", beside_config.display())),
+        // Present but unreadable is the ordinary case for an operator running
+        // `doctor` as themselves: the daemon can read it, and saying "not
+        // configured" would be wrong.
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => (
+            true,
+            format!(
+                "present at {} (readable only by the service user)",
+                beside_config.display()
+            ),
+        ),
+        Err(_) => (false, "NOT CONFIGURED".to_string()),
+    }
+}
+
 /// `sentinel doctor`: report what this host looks like to Sentinel.
 ///
 /// Read-only and offline. Its job is to answer "why is this host not being
@@ -216,8 +273,8 @@ pub async fn doctor(cli: &Cli, json: bool) -> anyhow::Result<i32> {
         "hardware": inspector.hardware(),
         "mounts": inspector.mounts().len(),
         "controller": config.agent.controller_address,
-        "credential_configured": std::env::var(CREDENTIAL_ENV).is_ok()
-            || std::env::var(CREDENTIAL_FILE_ENV).is_ok(),
+        "credential_configured": credential_status(&cli.config).0,
+        "credential_source": credential_status(&cli.config).1,
         "capabilities": capabilities,
     });
 
@@ -235,12 +292,13 @@ pub async fn doctor(cli: &Cli, json: bool) -> anyhow::Result<i32> {
         "Controller:  {}",
         config.agent.controller_address.as_deref().unwrap_or("(not configured)")
     );
+    let (credential_ok, credential_source) = credential_status(&cli.config);
     println!(
         "Credential:  {}",
-        if report["credential_configured"] == true {
-            "configured"
+        if credential_ok {
+            credential_source
         } else {
-            "NOT CONFIGURED"
+            "NOT CONFIGURED".to_string()
         }
     );
     println!(
@@ -309,6 +367,24 @@ mod tests {
             None => std::env::remove_var(CREDENTIAL_FILE_ENV),
         }
         result
+    }
+
+    #[test]
+    fn doctor_reports_the_credential_the_daemon_would_use() {
+        // Reported by an operator: `doctor` said NOT CONFIGURED on a host
+        // whose daemon was authenticating fine. It only looked at the
+        // environment, and a daemon gets the path from its unit -- so the
+        // check described the shell rather than the host.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("config.toml");
+
+        let (ok, message) = credential_status_from(None, None, &config);
+        assert!(!ok, "{message}");
+
+        std::fs::write(crate::cli::install_cmd::token_path(&config), "token\n").expect("write");
+        let (ok, message) = credential_status_from(None, None, &config);
+        assert!(ok, "{message}");
+        assert!(message.contains("token"), "it should name what it found: {message}");
     }
 
     #[test]

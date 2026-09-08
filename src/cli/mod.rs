@@ -178,6 +178,24 @@ pub enum EntityCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Show the raw observations behind an entity's state.
+    ///
+    /// What each observer actually saw, rather than what was concluded from
+    /// it. This is the level at which "healthy over SSH but unreachable"
+    /// stops being a contradiction and becomes two observers disagreeing.
+    Observations {
+        /// Entity canonical name or id.
+        name: String,
+        /// Only this probe.
+        #[arg(long)]
+        probe: Option<String>,
+        /// How many to show.
+        #[arg(long, default_value = "40")]
+        limit: u32,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `sentinel incident ...`.

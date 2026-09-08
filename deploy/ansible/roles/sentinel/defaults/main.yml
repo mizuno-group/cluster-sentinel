@@ -1,6 +1,17 @@
 ---
 # 取得する release。
-sentinel_version: v0.3.0
+#
+# このロールは v0.3.2 以降の機能（`install --binary`、`doctor --json` の
+# address 系フィールド）を使います。古い版を指定すると、バイナリを配り終えた
+# あとの `install` で失敗します。
+#
+# この既定値は Cargo.toml の version と一致していることを
+# tests/ansible_role.rs が強制します。
+sentinel_version: v0.3.3
+
+# このロールが動作する最小バージョン。上の既定を古い版に変える場合も、
+# これより下げることはできません。
+sentinel_minimum_version: 0.3.2
 sentinel_repo: Lzh-Function/cluster-sentinel
 
 # controller と一致させること。不一致の host は別クラスタとして扱われます。
@@ -20,6 +31,12 @@ sentinel_observer: false
 
 # controller 上の credential の場所。
 sentinel_token_source: /etc/sentinel/token
+
+# Release artefact per architecture. Hosts are matched on `ansible_architecture`,
+# so a cluster with both kinds needs no special handling in the inventory.
+sentinel_artefacts:
+  x86_64: sentinel-x86_64-unknown-linux-musl
+  aarch64: sentinel-aarch64-unknown-linux-musl
 
 sentinel_binary_path: /usr/local/bin/sentinel
 sentinel_config_dir: /etc/sentinel

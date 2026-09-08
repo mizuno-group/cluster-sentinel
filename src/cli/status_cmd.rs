@@ -30,6 +30,13 @@ pub struct EntityStatus {
     pub classifications: Vec<String>,
     /// Per-component health, excluding components that do not apply.
     pub components: BTreeMap<String, String>,
+    /// Where remote probes will reach this entity, and how that was decided.
+    ///
+    /// The single most useful thing when an entity is unreachable and looks
+    /// like it should not be: a host that registered no address is probed by
+    /// name, and a name that resolves slowly fails the probes with short
+    /// timeouts while leaving the longer ones passing.
+    pub endpoint: Option<String>,
     /// Inventory lifecycle.
     pub lifecycle: String,
     /// Capabilities in force.
@@ -100,6 +107,21 @@ fn describe(entity: &ManagedEntity, state: Option<&EntityState>) -> EntityStatus
         classifications: state
             .map(|s| s.classifications.iter().map(|c| c.as_str().to_string()).collect())
             .unwrap_or_default(),
+        endpoint: crate::controller::endpoint_for(entity).map(|e| {
+            let address = e.address.clone();
+            let source = if entity
+                .metadata
+                .get("host")
+                .and_then(|h| h.get("addresses"))
+                .and_then(|a| a.as_array())
+                .is_some_and(|a| !a.is_empty())
+            {
+                "reported by its agent"
+            } else {
+                "this entity's name — no address was registered, so it is resolved on every probe"
+            };
+            format!("{address} ({source})")
+        }),
         components: state
             .map(|s| {
                 s.components
@@ -224,6 +246,12 @@ pub fn render_entity(entity: &EntityStatus) -> String {
         for capability in &entity.capabilities {
             out.push_str(&format!("{capability}\n"));
         }
+    }
+
+    out.push_str("\nProbed at:\n");
+    match &entity.endpoint {
+        Some(endpoint) => out.push_str(&format!("{endpoint}\n")),
+        None => out.push_str("(nowhere — no address and no usable name)\n"),
     }
 
     out.push_str(&format!("\nOverall:\n{}\n", entity.health.to_uppercase()));
@@ -386,6 +414,27 @@ mod tests {
             render(&report).contains("(stale)"),
             "an operator must see that this is no longer reported"
         );
+    }
+
+    #[test]
+    fn entity_detail_says_where_probes_will_go_and_why() {
+        // The question an unreachable-but-apparently-fine host raises. A host
+        // that registered no address is probed by name, resolved on every
+        // attempt, and that difference decides whether a three-second probe
+        // finishes while a five-second one does.
+        let named = ManagedEntity::new("lab", EntityType::Host, "node01");
+        let mut reported = ManagedEntity::new("lab", EntityType::Host, "node02");
+        reported.metadata = serde_json::json!({ "host": { "addresses": ["192.0.2.20"] } });
+
+        let inventory = inventory_with(vec![named, reported]);
+        let report = StatusReport::build("lab", &inventory, &BTreeMap::new());
+
+        let by_name = render_entity(report.entities.iter().find(|e| e.name == "node01").unwrap());
+        assert!(by_name.contains("no address was registered"), "{by_name}");
+
+        let by_address = render_entity(report.entities.iter().find(|e| e.name == "node02").unwrap());
+        assert!(by_address.contains("192.0.2.20"), "{by_address}");
+        assert!(by_address.contains("reported by its agent"), "{by_address}");
     }
 
     #[test]

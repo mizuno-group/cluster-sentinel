@@ -7,3 +7,8 @@
 # Site-specific host names, checked by tests/deployment_data_stays_out_of_core.rs.
 # One per line. Never committed.
 tests/deployment-names.txt
+
+# Ansible vault: 暗号化前に誤って commit されるのを防ぐ。
+deploy/ansible/group_vars/*/vault.yml
+deploy/ansible/host_vars/
+deploy/ansible/inventory.ini

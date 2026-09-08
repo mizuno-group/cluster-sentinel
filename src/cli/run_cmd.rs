@@ -549,7 +549,104 @@ pub async fn entity(cli: &Cli, command: &EntityCommand) -> anyhow::Result<i32> {
             }
             Ok(0)
         }
+        EntityCommand::Observations {
+            name,
+            probe,
+            limit,
+            json,
+        } => {
+            let inventory = store.load_inventory(&config.environment).await?;
+            let Some(target) = inventory
+                .entities()
+                .find(|e| &e.canonical_name == name || e.id.to_string() == *name)
+            else {
+                eprintln!(
+                    "error: no entity named {name:?} in environment {:?}",
+                    config.environment
+                );
+                return Ok(1);
+            };
+
+            let observations = store.recent_observations(target.id, *limit).await?;
+            let observations: Vec<_> = observations
+                .into_iter()
+                .filter(|o| probe.as_deref().is_none_or(|p| o.probe_id.as_str() == p))
+                .collect();
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&observations)?);
+            } else {
+                print!("{}", render_observations(&inventory, &observations));
+            }
+            Ok(0)
+        }
     }
+}
+
+/// Render observations for a human, resolving observers to names.
+///
+/// Grouped by probe, because the question being asked is almost always
+/// "why does this one disagree with that one", and the answer is the error
+/// each observer recorded.
+fn render_observations(
+    inventory: &crate::inventory::Inventory,
+    observations: &[crate::observation::Observation],
+) -> String {
+    if observations.is_empty() {
+        return "No observations recorded for this entity yet.\n".to_string();
+    }
+
+    let name_of = |id: crate::entity::EntityId| {
+        inventory
+            .entities()
+            .find(|e| e.id == id)
+            .map(|e| e.canonical_name.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{:<19}  {:<18}  {:<14}  {:<12}  {}\n",
+        "WHEN", "PROBE", "OBSERVER", "STATUS", "DETAIL"
+    ));
+    out.push_str(&"\u{2500}".repeat(100));
+    out.push('\n');
+
+    for observation in observations {
+        let observer = match observation.observer_entity {
+            Some(id) => name_of(id),
+            // No observer means the target measured itself: a local probe
+            // reported by its own agent.
+            None => "(itself)".to_string(),
+        };
+
+        // What was seen, in the order it is useful: the error if there was
+        // one, otherwise where the probe went and what came back.
+        let detail = observation
+            .error_message
+            .clone()
+            .or_else(|| observation.error_code.clone())
+            .unwrap_or_else(|| {
+                let address = observation.payload.get("address").and_then(|v| v.as_str());
+                let port = observation.payload.get("port").and_then(|v| v.as_u64());
+                let outcome = observation.payload.get("outcome").and_then(|v| v.as_str());
+                match (address, port, outcome) {
+                    (Some(a), Some(p), Some(o)) => format!("{a}:{p} {o}"),
+                    (Some(a), Some(p), None) => format!("{a}:{p}"),
+                    _ => String::new(),
+                }
+            });
+
+        out.push_str(&format!(
+            "{:<19}  {:<18}  {:<14}  {:<12}  {}\n",
+            observation.finished_at.format("%m-%d %H:%M:%S"),
+            observation.probe_id.as_str(),
+            observer,
+            observation.status.as_str(),
+            detail
+        ));
+    }
+    out
 }
 
 /// `sentinel dependency ...`.
@@ -599,6 +696,64 @@ pub async fn dependency(cli: &Cli, command: &DependencyCommand) -> anyhow::Resul
             }
             Ok(0)
         }
+    }
+}
+
+#[cfg(test)]
+mod observation_rendering_tests {
+    use super::*;
+    use crate::entity::{EntityKey, EntityType, ManagedEntity};
+    use crate::observation::{Observation, ProbeStatus};
+
+    fn inventory() -> crate::inventory::Inventory {
+        let mut inventory = crate::inventory::Inventory::new();
+        for name in ["node01", "node02"] {
+            inventory.insert_entity(ManagedEntity::new("lab", EntityType::Host, name));
+        }
+        inventory
+    }
+
+    fn target() -> crate::entity::EntityId {
+        EntityKey::new("lab", EntityType::Host, "node01").entity_id()
+    }
+
+    fn observer() -> crate::entity::EntityId {
+        EntityKey::new("lab", EntityType::Host, "node02").entity_id()
+    }
+
+    #[test]
+    fn each_line_says_who_saw_what() {
+        // The question this exists for: two observers disagreeing about one
+        // host. Without the observer on the line there is no way to see that
+        // is what is happening.
+        let observations = vec![
+            Observation::new("network.tcp".into(), target(), ProbeStatus::Ok)
+                .with_observer(observer())
+                .with_payload(serde_json::json!({"address": "192.0.2.22", "port": 22, "outcome": "connected"})),
+            Observation::new("network.tcp".into(), target(), ProbeStatus::Failed)
+                .with_error("timed_out", "no answer within 3s"),
+        ];
+
+        let text = render_observations(&inventory(), &observations);
+        assert!(text.contains("node02"), "{text}");
+        assert!(text.contains("192.0.2.22:22 connected"), "{text}");
+        assert!(text.contains("no answer within 3s"), "{text}");
+    }
+
+    #[test]
+    fn a_local_probe_is_marked_as_the_host_measuring_itself() {
+        // No observer is not missing information: it means the agent on that
+        // host reported it, which is a different kind of evidence from a
+        // remote view and should not look like a gap.
+        let observations = vec![Observation::new("host.metrics".into(), target(), ProbeStatus::Ok)];
+        let text = render_observations(&inventory(), &observations);
+        assert!(text.contains("(itself)"), "{text}");
+    }
+
+    #[test]
+    fn nothing_recorded_says_so_rather_than_printing_a_bare_header() {
+        let text = render_observations(&inventory(), &[]);
+        assert!(text.contains("No observations"), "{text}");
     }
 }
 

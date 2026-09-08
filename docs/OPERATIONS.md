@@ -107,6 +107,26 @@ sentinel doctor              # この host から見た自分自身
 sentinel prune --dry-run     # 保持期間を過ぎた記録の量
 ```
 
+### 結論ではなく、生の観測を見る
+
+state や diagnosis が腑に落ちないときは、**何が観測されたのか**を直接見ます。
+
+```bash
+sudo -u sentinel sentinel entity observations <name>
+sudo -u sentinel sentinel entity observations <name> --probe network.tcp --limit 100
+```
+
+```
+WHEN                 PROBE               OBSERVER        STATUS        DETAIL
+────────────────────────────────────────────────────────────────────────────
+09-08 10:35:43       network.tcp         node02          ok            192.0.2.22:22 connected
+09-08 10:35:42       network.tcp         head01          failed        no answer within 3s
+```
+
+**observer 列が肝です。** 「SSH は通るのに到達不能」のような一見矛盾した状態は、
+たいてい観測者ごとに結果が違うだけで、この列を見れば矛盾ではなくなります。
+`(itself)` はその host の agent 自身による観測です。
+
 すべて `--json` に対応しているため、スクリプトから利用できます。
 
 `sentinel status` は異常があれば exit code 2 を返します。

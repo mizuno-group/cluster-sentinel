@@ -1,0 +1,19 @@
+---
+# これを group_vars/agents/vault.yml としてコピーし、
+# 必ず ansible-vault で暗号化してください。
+#
+#   cp group_vars/agents/vault.yml.example group_vars/agents/vault.yml
+#   $EDITOR group_vars/agents/vault.yml
+#   ansible-vault encrypt group_vars/agents/vault.yml
+#
+# 以降の編集は次のコマンドで行います（自動で復号・再暗号化されます）。
+#
+#   ansible-vault edit group_vars/agents/vault.yml
+#
+# 暗号化していない vault.yml を commit しないでください。
+# .gitignore で除外してありますが、確認する癖をつけてください。
+vault_become_passwords:
+  node01: CHANGE-ME
+  node02: CHANGE-ME
+  node03: CHANGE-ME
+  fileserver01: CHANGE-ME

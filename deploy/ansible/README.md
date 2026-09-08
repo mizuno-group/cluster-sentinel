@@ -14,6 +14,36 @@
 * controller 側で `sentinel install controller` が済んでおり、
   `/etc/sentinel/token` が存在する
 
+## どのユーザーで SSH するか
+
+**ユーザー名は秘密情報ではないので、`ansible-vault` は要りません。**
+決まる順序は次のとおりです。
+
+| 優先 | 指定方法 |
+| --- | --- |
+| 1 | inventory の `ansible_user = li` |
+| 2 | `ansible-playbook -u li` |
+| 3 | `ansible.cfg` の `remote_user` |
+| 4 | **`~/.ssh/config` の `User`** |
+| 5 | 実行している人のローカルユーザー名 |
+
+Ansible は既定で `ssh` コマンドを使うため、**`~/.ssh/config` をそのまま尊重します。**
+普段 `ssh node01` で入れているなら、Ansible も同じ設定で入ります。
+inventory に何も書かなくて済むので、これが一番きれいです。
+
+```
+# ~/.ssh/config
+Host node* filesrv*
+    User li
+    Port 22
+```
+
+疎通確認:
+
+```bash
+ansible -i inventory.ini agents -m ping -K
+```
+
 ## パスワードが必要な場合
 
 SSH にも `sudo` にもパスワードが要る、という環境は珍しくありません。両方扱えます。
@@ -59,28 +89,106 @@ ansible-playbook -i inventory.ini site.yml -K
 
 全 `sudo` を NOPASSWD にする必要はありません。
 
-### ノードごとにパスワードが違う場合
+### ansible-vault が必要なのはどこか
 
-`--ask-pass` は 1 つしか受け付けません。`ansible-vault` で
-ホスト変数として持たせてください。
+| 状況 | 必要なもの |
+| --- | --- |
+| SSH 鍵、`sudo` パスワード共通 | `-K` だけ |
+| SSH もパスワード、両方共通 | `--ask-pass -K`（+ `sshpass`） |
+| **ノードごとに `sudo` パスワードが違う** | **ansible-vault**（下記。1 ファイルで済みます） |
+| ユーザー名がノードごとに違う | `~/.ssh/config` か `ansible_user`（vault 不要） |
 
-```bash
-ansible-vault create host_vars/node01.yml
-```
+クラスタは通常、全ノードで同じアカウント・同じパスワードなので、
+**`--ask-pass -K` で足ります。** vault が要るのはパスワードが分かれている場合だけです。
+
+### ノードごとに sudo パスワードが違う場合
+
+`--ask-become-pass` は 1 つしか受け付けないので、ここが vault の出番です。
+**ただしノード 1 台につき 1 ファイル作る必要はありません。**
+暗号化ファイル 1 つに全ノード分を辞書で持たせます。
+
+`group_vars/agents/vars.yml`（平文、commit してよい）:
 
 ```yaml
-ansible_password: "..."
-ansible_become_password: "..."
+ansible_become_password: "{{ vault_become_passwords[inventory_hostname] }}"
 ```
+
+`group_vars/agents/vault.yml`（暗号化）:
+
+```yaml
+vault_become_passwords:
+  node01: "..."
+  node02: "..."
+  fileserver01: "..."
+```
+
+作り方:
 
 ```bash
-ansible-playbook -i inventory.ini site.yml --ask-vault-pass
+cp group_vars/agents/vault.yml.example group_vars/agents/vault.yml
+$EDITOR group_vars/agents/vault.yml          # 実際のパスワードを書く
+ansible-vault encrypt group_vars/agents/vault.yml
 ```
 
-**平文の `inventory.ini` にパスワードを書かないでください。**
-このリポジトリに commit されます。
+以降の編集は `ansible-vault edit group_vars/agents/vault.yml` で行います
+（自動で復号し、保存時に再暗号化します）。
 
-### credential の読み取りについて
+実行:
+
+```bash
+ansible-playbook -i inventory.ini site.yml --ask-vault-pass -K
+```
+
+**2 ファイルに分けるのは慣習です。** 暗号化ファイルは `git diff` でも
+`grep` でも中身が見えないので、「どの変数がどこから来るのか」を
+平文側に残しておくと後から読めます。
+
+#### `-K` も併せて必要です
+
+credential を読むタスクは **controller 上で root として実行**します
+（`delegate_to: localhost` + `become: true`）。
+localhost は inventory に居ないので `vault_become_passwords` が効かず、
+ここだけ `--ask-become-pass` の値が使われます。
+
+`ansible_become_password` 変数が設定されているホストではそちらが優先されるため、
+**`-K` で入力した値は controller 用、vault の値は各ノード用**、と自然に分かれます。
+
+controller の sudo パスワードを入力したくない場合は、
+credential の複製を自分で読める場所に置き、そちらを指してください。
+
+```bash
+sudo cp /etc/sentinel/token ~/sentinel-token
+sudo chown "$USER" ~/sentinel-token && chmod 600 ~/sentinel-token
+ansible-playbook -i inventory.ini site.yml --ask-vault-pass \
+  -e sentinel_token_source=~/sentinel-token
+```
+
+この場合 `-K` は不要になります。**使い終わったら消してください。**
+
+#### vault パスワードを毎回入力したくない場合
+
+```bash
+echo "vault のパスワード" > ~/.ansible-vault-pass
+chmod 600 ~/.ansible-vault-pass
+ansible-playbook -i inventory.ini site.yml \
+  --vault-password-file ~/.ansible-vault-pass -K
+```
+
+**vault の中身を守っているのはこのファイルだけ**になります。
+ホームディレクトリが他人から読めない、暗号化されている、
+といった前提が置ける場合にのみ使ってください。
+
+### sudo をパスワード無しにするという選択
+
+各ノードで 1 回ずつ sudo できるなら、そちらのほうが恒久的に楽です。
+ただし **Ansible は python module を root で実行する**ため、
+「sentinel コマンドだけ NOPASSWD」では足りず、実質的に
+その運用ユーザーの `NOPASSWD: ALL` が必要になります。
+
+サイトのセキュリティ方針として許容できるかどうかで判断してください。
+許容できないなら vault が正解です。
+
+### credential の読み取りについて### credential の読み取りについて
 
 `/etc/sentinel/token` は mode 0400、`sentinel` ユーザー所有です。
 ロールは **controller 上で root として読み取り**、各ノードへ配ります
@@ -127,7 +235,8 @@ ansible-playbook -i inventory.ini site.yml --limit node02
 
 | 変数 | 既定 | 意味 |
 | --- | --- | --- |
-| `sentinel_version` | `v0.3.0` | 取得する release |
+| `sentinel_version` | このリポジトリの版 | 取得する release |
+| `sentinel_minimum_version` | `0.3.2` | このロールが必要とする最小版 |
 | `sentinel_environment` | *(必須)* | controller と一致させる |
 | `sentinel_controller_address` | *(必須)* | `host:port` |
 | `sentinel_interface` | *(未設定)* | クラスタ内通信の NIC 名 |
@@ -146,6 +255,16 @@ sudo -u sentinel sentinel peers
 
 `sentinel doctor` の報告アドレスに `!` の警告が出ていないか確認してください。
 出ていれば `sentinel_interface` を設定して再実行します。
+
+## バージョンについて
+
+`sentinel_version` の既定値は、**このリポジトリがビルドする版と一致します**
+（`tests/ansible_role.rs` が強制します）。古い release を指定すると、
+ロールが使う `install --binary` や `doctor --json` の address 系フィールドが
+無いため、バイナリを配り終えたあとの `install` で失敗します。
+
+そのため、**バイナリを配置した直後にバージョンを検査**し、
+古ければ「command-line の引数エラー」ではなく理由の分かるメッセージで止まります。
 
 ## アップグレード
 

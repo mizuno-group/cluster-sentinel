@@ -20,6 +20,28 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.3
+
+実機での切り分けに必要だったものと、Ansible ロールの修正。
+
+* **`sentinel entity observations <name>`**（新規）。
+  state や diagnosis ではなく、**どの観測者が何を見たか**を直接表示する。
+  時刻 / probe / observer / status / アドレスと失敗理由。
+  「SSH は通るのに到達不能」のような一見矛盾した状態は、
+  観測者ごとの食い違いであることが多く、observer 列を見れば矛盾でなくなる。
+* **`sentinel entity show` が probe 先アドレスと、その決まり方を表示する。**
+  agent が報告したアドレスなのか、entity 名から毎回解決しているのかは、
+  probe の成否を左右するが、これまで出力に無かった。
+* **`doctor` の credential 判定が環境変数しか見ていなかった。**
+  daemon は unit の `SENTINEL_TOKEN_FILE` から読むため、対話シェルでは
+  常に NOT CONFIGURED と表示されていた。設定ファイルの隣の token も見る。
+* **Ansible ロールの `sentinel_version` が v0.3.0 のままだった。**
+  ロール自身が使う `install --binary` を持たないバイナリを配っていた。
+  リポジトリの版と一致していないとテストが落ちるようにした。
+* Ansible ロールがアーキテクチャ別の成果物を明示的な対応表で選ぶ。
+* Ansible: SSH ユーザーの決まり方、ノードごとに異なる sudo パスワード
+  （暗号化ファイル 1 つで済む方法）を文書化。
+
 ## v0.3.2
 
 * **`install --force` が credential を上書きしなくなった**（バグ修正）。
