@@ -245,6 +245,96 @@ ansible-playbook -i inventory.ini site.yml --limit node02
 | `sentinel_token_source` | `/etc/sentinel/token` | controller 上の credential |
 | `sentinel_download_dir` | `/tmp` | 一時ファイルの置き場 |
 
+## 何度実行しても同じ結果になります
+
+まっさらな host から 3 回連続で実行して確認しています。
+
+```
+1回目   changed=9
+2回目   changed=0
+3回目   changed=0
+```
+
+設定ファイルは**毎回テンプレートから全体を書き直します**（追記ではありません）。
+そのため:
+
+* 何度実行しても内容は増えません
+* **手で編集した内容は次回の実行で消えます。** 変更は
+  `inventory.ini` か `group_vars/` に書いてください
+
+credential は controller のものをそのまま配るだけで、生成も再生成もしません。
+
+## controller の設定が唯一の出所です
+
+**同じ設定を 2 箇所で保守する必要はありません。** ロールは実行時に
+controller の `config.toml` を読み、揃っていなければならない設定を各ノードへ配ります。
+
+| 設定 | 出所 |
+| --- | --- |
+| `environment` | **controller の config.toml** |
+| `[probes]`（監視頻度） | **controller の config.toml** |
+| `[tls]` の `ca` / `server_name` / `insecure_skip_verify` | **controller の config.toml** |
+| controller の待ち受けポート | **controller の config.toml** |
+| `controller_address` のホスト部 | inventory |
+| `interface` / `roles` / observer 指定 | inventory（host ごとに違うため） |
+| TLS の client 証明書と鍵 | inventory（host ごとに違うため） |
+
+読み取りには **controller 自身のバイナリ**（`sentinel config show --json`）を
+使います。TOML を別途パースするのではなく、**daemon が解釈するのと同じ値**が
+配られます。
+
+### 監視頻度を変える
+
+controller の設定を変えて、playbook を流すだけです。
+
+```bash
+sudo -u sentinel $EDITOR /etc/sentinel/config.toml
+```
+
+```toml
+[probes."network.tcp"]
+interval = "15s"
+```
+
+```bash
+sudo systemctl restart sentinel-controller
+ansible-playbook -i inventory.ini site.yml --ask-vault-pass -K
+```
+
+`[probes]` は controller と agent の両方で必要です（controller も remote probe を
+自分で実行するため）。この仕組みにより、**書くのは controller の 1 箇所だけ**です。
+
+### 食い違いはエラーになります
+
+inventory に `sentinel_environment` を書いていて、controller の値と違う場合は
+実行が止まります。値が同じなら何も起きません。
+
+```
+sentinel_environment is wrong-lab but the controller says mizuno-group.
+Remove it from the inventory: with sentinel_sync_from_controller the
+controller decides, and two places to change it is what that setting
+exists to avoid.
+```
+
+### 同期を切る場合
+
+```bash
+ansible-playbook -i inventory.ini site.yml -e sentinel_sync_from_controller=false
+```
+
+このとき `sentinel_environment` と `sentinel_probes` は inventory に書きます。
+
+### controller 自身には流さないでください
+
+ロールは設定ファイルをテンプレートから**全体を書き直す**ため、controller に
+対して流すと controller の設定が agent のもので置き換わります。
+`sentinel-controller.service` があるホストは**実行を拒否**します。
+
+controller に agent を同居させる場合は、
+`docs/DEPLOYMENT.md` の手順で `[agent]` セクションを手で追記してください
+（1 つの設定ファイルに `[controller]` と `[agent]` の両方を書けます）。
+バイナリと unit だけ配りたい場合は `sentinel_manage_config=false` を使います。
+
 ## 検証
 
 ```bash

@@ -20,6 +20,31 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.4
+
+Ansible ロールのみの変更です。バイナリに変更はありません。
+
+* **controller の設定が唯一の出所になった。** ロールが実行時に controller の
+  `config.toml` を読み、揃っていなければならない設定
+  （`environment` / `[probes]` / `[tls]` の client 側 / 待ち受けポート）を
+  各ノードへ配る。読み取りは controller 自身のバイナリ
+  （`config show --json`）で行うため、daemon が解釈するのと同じ値が配られる。
+  監視頻度の変更が controller 1 箇所の編集で済む。
+* **credential が 0750 になっていた**（バグ修正）。所有者とモードを
+  `recurse` で一括設定していたため、再帰的な `file` タスクが
+  ディレクトリ用のモードをファイルにも適用し、直前に 0400 で書いた
+  token を group 読み取り可能かつ実行可能にしていた。
+* **毎回バイナリを再ダウンロードしていた**（バグ修正）。
+  `sentinel_version` は `v0.3.3`、`sentinel version` の出力は `sentinel 0.3.3`。
+  先頭の `v` のせいで比較が一致せず、実行のたびに全ノードが取得していた。
+* **`-e sentinel_observer=false` が observer を有効にしていた**（バグ修正）。
+  `-e` で渡された値は文字列で、`"false"` は真。boolean を全て `| bool` で受ける。
+* **controller に対して実行すると controller の設定を破壊していた。**
+  `sentinel-controller.service` があるホストでは実行を拒否する。
+  `sentinel_manage_config=false` でバイナリと unit のみの配布も可能。
+* `[probes]` を inventory から設定できるようになった（同期を使わない場合）。
+* 冪等性を検証: まっさらから 1 回目 `changed=9`、2 回目以降 `changed=0`。
+
 ## v0.3.3
 
 実機での切り分けに必要だったものと、Ansible ロールの修正。

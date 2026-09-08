@@ -7,7 +7,7 @@ config_version = 1
 environment = "{{ sentinel_environment }}"
 
 [agent]
-controller_address = "{{ sentinel_controller_address }}"
+controller_address = "{{ sentinel_controller_address if ':' in sentinel_controller_address else sentinel_controller_address ~ ':' ~ sentinel_controller_port }}"
 spool_path = "/var/lib/sentinel/spool.db"
 listen = "0.0.0.0:7444"
 roles = {{ sentinel_roles | to_json }}
@@ -16,7 +16,41 @@ roles = {{ sentinel_roles | to_json }}
 # peer がこの host に到達する NIC。自動検出では site の事実を答えられません。
 interface = "{{ sentinel_interface }}"
 {% endif %}
-{% if sentinel_observer %}
+{% if sentinel_probes %}
+
+# ---------------------------------------------------------------------------
+# 監視頻度
+#
+# probe ごとの上書き。書かれていない probe は既定のまま動きます。
+# controller と agent の両方で同じ値にしてください。
+# ---------------------------------------------------------------------------
+{% for probe, settings in sentinel_probes.items() %}
+[probes."{{ probe }}"]
+{% for key, value in settings.items() if value is not none %}{{ key }} = {{ value | to_json }}
+{% endfor %}
+{% endfor %}
+{% endif %}
+{% if sentinel_tls_ca or sentinel_tls_client_cert or sentinel_tls_server_name or sentinel_tls_insecure | bool %}
+
+# ---------------------------------------------------------------------------
+# TLS
+#
+# ca / server_name / insecure_skip_verify は controller から同期されます。
+# 証明書と鍵はこの host 固有なので inventory で指定します。
+# ---------------------------------------------------------------------------
+[tls]
+{% if sentinel_tls_ca %}ca = "{{ sentinel_tls_ca }}"
+{% endif %}
+{% if sentinel_tls_client_cert %}client_cert = "{{ sentinel_tls_client_cert }}"
+{% endif %}
+{% if sentinel_tls_client_key %}client_key = "{{ sentinel_tls_client_key }}"
+{% endif %}
+{% if sentinel_tls_server_name %}server_name = "{{ sentinel_tls_server_name }}"
+{% endif %}
+{% if sentinel_tls_insecure | bool %}insecure_skip_verify = true
+{% endif %}
+{% endif %}
+{% if sentinel_observer | bool %}
 
 # この host は peer observer です。
 # observer は互いに異なる障害ドメインから選ぶこと。

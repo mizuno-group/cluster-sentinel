@@ -1,4 +1,82 @@
 ---
+# The controller's configuration is the source of truth for everything that
+# has to match between it and the agents. Read with the controller's own
+# binary rather than by parsing TOML, so what gets distributed is what the
+# daemon actually believes -- and so a setting changed in one place does not
+# have to be remembered in a second.
+- name: Read the controller's effective configuration
+  ansible.builtin.command: >-
+    {{ sentinel_binary_path }} --config {{ sentinel_controller_config }} config show --json
+  delegate_to: localhost
+  become: true
+  run_once: true
+  register: sentinel_controller_config_json
+  changed_when: false
+  # Reported rather than raised, so the next task can say what went wrong
+  # instead of leaving an exit code and an empty stderr.
+  failed_when: false
+  when: sentinel_sync_from_controller | bool
+
+- name: The controller's configuration could be read
+  ansible.builtin.assert:
+    that: sentinel_controller_config_json.rc == 0
+    fail_msg: >-
+      cannot read {{ sentinel_controller_config }} on the control node using
+      {{ sentinel_binary_path }} (exit {{ sentinel_controller_config_json.rc }}).
+      This runs on the controller, which should have both. Check the path with
+      sentinel_controller_config, or set sentinel_sync_from_controller=false and
+      put sentinel_environment and sentinel_probes in the inventory instead.
+      {{ sentinel_controller_config_json.stderr | default('') }}
+  when: sentinel_sync_from_controller | bool
+
+- name: Nothing was set here that the controller also decides
+  ansible.builtin.assert:
+    that:
+      - sentinel_environment | length == 0 or sentinel_environment == controller.environment
+    fail_msg: >-
+      sentinel_environment is {{ sentinel_environment }} but the controller says
+      {{ controller.environment }}. Remove it from the inventory: with
+      sentinel_sync_from_controller the controller decides, and two places to
+      change it is what that setting exists to avoid.
+  vars:
+    controller: "{{ sentinel_controller_config_json.stdout | from_json }}"
+  when: sentinel_sync_from_controller | bool
+
+- name: Take the settings that must match from the controller
+  ansible.builtin.set_fact:
+    sentinel_environment: "{{ controller.environment }}"
+    # Passed through as it is. Keys the controller left unset arrive as null,
+    # and the template skips them: writing `interval = null` would be a
+    # configuration file that does not parse.
+    sentinel_probes: "{{ controller.probes | default({}) }}"
+    sentinel_tls_ca: "{{ controller.tls.ca | default('') or '' }}"
+    sentinel_tls_server_name: "{{ controller.tls.server_name | default('') or '' }}"
+    sentinel_tls_insecure: "{{ controller.tls.insecure_skip_verify | default(false) }}"
+    sentinel_controller_port: "{{ (controller.controller.listen | default('0.0.0.0:7443')).split(':') | last }}"
+  vars:
+    controller: "{{ sentinel_controller_config_json.stdout | from_json }}"
+  when: sentinel_sync_from_controller | bool
+
+# The configuration is rendered whole from a template, so running this role
+# against the controller would replace the controller's own configuration with
+# an agent's. A host may legitimately run both daemons -- one file can carry
+# both sections -- but then the file is not this role's to write.
+- name: Look for a controller on this host
+  ansible.builtin.stat:
+    path: /etc/systemd/system/sentinel-controller.service
+  register: sentinel_controller_unit
+
+- name: This host is not a controller
+  ansible.builtin.assert:
+    that: not sentinel_controller_unit.stat.exists
+    fail_msg: >-
+      {{ inventory_hostname }} runs a controller, and this role writes
+      {{ sentinel_config_dir }}/config.toml from a template -- it would replace
+      the controller's configuration with an agent's. Remove this host from the
+      inventory and add its [agent] section by hand (docs/DEPLOYMENT.md), or set
+      sentinel_manage_config=false to deploy the binary and unit only.
+  when: sentinel_manage_config | bool
+
 # Fail early and by name. A playbook that runs to completion against thirteen
 # nodes and leaves them all misconfigured costs more than one that refuses to
 # start.
@@ -50,7 +128,10 @@
       https://github.com/{{ sentinel_repo }}/releases/download/{{ sentinel_version }}/{{ sentinel_artefact }}
     dest: "{{ sentinel_download_dir }}/{{ sentinel_artefact }}"
     mode: "0755"
-  when: sentinel_version not in (sentinel_installed.stdout | default(''))
+  # The tag carries a leading `v` and `sentinel version` does not, so this
+  # compares the numbers. Without the strip the test never matched and every
+  # run downloaded the binary again.
+  when: sentinel_version | regex_replace('^v', '') not in (sentinel_installed.stdout | default(''))
   register: sentinel_download
 
 - name: Fetch its checksum
@@ -150,6 +231,7 @@
 # Written from a template rather than edited in place, so a node's
 # configuration is whatever the inventory says and nothing else.
 - name: The configuration says what the inventory says
+  when: sentinel_manage_config | bool
   ansible.builtin.template:
     src: config.toml.j2
     dest: "{{ sentinel_config_dir }}/config.toml"
@@ -158,13 +240,24 @@
     mode: "0640"
   notify: Restart sentinel-agent
 
-- name: Everything under /etc/sentinel belongs to the service user
+# Two tasks, not one with `recurse`. A recursive `file` task carrying a mode
+# applies that mode to the files as well as the directory, which turned the
+# 0400 credential into 0750 -- group-readable and executable -- and left every
+# subsequent run flipping it back and forth.
+- name: The configuration directory is the service user's
   ansible.builtin.file:
     path: "{{ sentinel_config_dir }}"
     state: directory
     owner: "{{ sentinel_user }}"
     group: "{{ sentinel_user }}"
     mode: "0750"
+
+- name: Everything in it belongs to the service user, keeping its own mode
+  ansible.builtin.file:
+    path: "{{ sentinel_config_dir }}"
+    state: directory
+    owner: "{{ sentinel_user }}"
+    group: "{{ sentinel_user }}"
     recurse: true
 
 # Before starting, not after. A node that fails to start because of a typo is

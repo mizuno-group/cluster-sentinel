@@ -17,6 +17,22 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.4 での変更
+
+**Ansible ロールのみの変更です。バイナリに変更はありません。**
+`deploy/ansible/` を使っている場合は `git pull` してください。
+
+* **controller の `config.toml` が唯一の出所になりました。**
+  `environment`・`[probes]`（監視頻度）・`[tls]` の client 側・待ち受けポートを
+  ロールが controller から読み取って各ノードへ配ります。
+  監視頻度の変更は controller 1 箇所の編集で済みます。
+* **credential が 0750 になっていました**（修正）。
+  再帰的な `file` タスクがディレクトリ用のモードをファイルにも適用し、
+  0400 で書いた token を group 読み取り可能にしていました。
+* **毎回バイナリを再ダウンロードしていました**（修正）。
+* **`-e sentinel_observer=false` が observer を有効にしていました**（修正）。
+* **controller に対して実行すると設定を破壊していました**（実行を拒否するよう修正）。
+
 ## v0.3.3 での変更
 
 **切り分け用のコマンドが増えました。**
