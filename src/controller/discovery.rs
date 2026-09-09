@@ -72,12 +72,6 @@ impl DiscoveryReport {
     }
 }
 
-/// How far back to look for a host's most recent mount report.
-///
-/// Only the newest is used; this needs to be deep enough that the other probes
-/// running against the same host in the meantime do not push it out.
-const MOUNT_OBSERVATIONS_PER_HOST: u32 = 64;
-
 impl Controller {
     /// Run one discovery cycle and persist everything it produced.
     pub async fn discover_once(&mut self) -> Result<DiscoveryReport, StoreError> {
@@ -236,11 +230,23 @@ impl Controller {
             if entity.entity_type != crate::entity::EntityType::Host {
                 continue;
             }
-            // Only the newest mount report counts: an old one describes a
-            // mount table that has since changed.
+            // The newest of each probe, not the newest N observations. A
+            // count-based window fills with whatever runs most often: peer
+            // reachability every five seconds from every observer, against a
+            // mount report every thirty. On a host with three observers the
+            // mount report is gone from such a window inside a minute, and
+            // when it is, the storage domains only that host mounts vanish
+            // from the snapshot and are marked stale -- a topology that
+            // flickers in step with the eviction rather than with the mounts.
+            //
+            // No age bound here, unlike diagnosis. The last known mount table
+            // is the best available answer to "what does this host use"; an
+            // agent that has stopped reporting is a question about that host's
+            // health, which is answered separately and would only be answered
+            // twice, worse, by letting the graph forget.
             if let Some(latest) = self
                 .store()
-                .recent_observations(entity.id, MOUNT_OBSERVATIONS_PER_HOST)
+                .latest_observations(entity.id)
                 .await?
                 .into_iter()
                 .find(|o| o.probe_id.as_str() == crate::probes::nfs::PROBE_CLIENT_MOUNT)

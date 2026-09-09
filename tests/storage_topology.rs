@@ -276,3 +276,57 @@ type = "uses_storage"
         "the declared edge stands on its own"
     );
 }
+
+#[tokio::test]
+async fn a_busy_host_does_not_lose_the_storage_it_mounts() {
+    // Seen on the cluster the day this shipped: four storage domains appeared
+    // in `status` as UNKNOWN (stale) while the fifth was fine. The four were
+    // the ones mounted by a single host -- the controller's own, which had
+    // just gained an agent and three peer observers.
+    //
+    // Reachability runs every five seconds from each observer; the mount
+    // report runs every thirty. Reading "the last N observations for this
+    // host" therefore lost the mount report inside a minute, and a snapshot
+    // that does not mention a storage domain is a snapshot that says it is
+    // gone. The graph flickered in step with the eviction rather than with the
+    // mounts.
+    let mut controller = controller(&["node01", "busy01"]).await;
+    controller.discover_once().await.expect("initial discovery");
+
+    controller
+        .ingest_observations(&[
+            mount_report("node01", &["filesrv02:/data"]),
+            mount_report("busy01", &["andre01:/data", "david01:/home"]),
+        ])
+        .await
+        .expect("mount reports");
+    assert_eq!(controller.discover_once().await.expect("discovery").storage_edges, 3);
+
+    // busy01 now accumulates what a host with several observers accumulates.
+    let noise: Vec<Observation> = (0..500)
+        .map(|_| {
+            Observation::new(
+                ProbeId::new(sentinel::probes::network::PROBE_ID),
+                host("busy01"),
+                ProbeStatus::Ok,
+            )
+        })
+        .collect();
+    controller.ingest_observations(&noise).await.expect("noise");
+
+    let report = controller.discover_once().await.expect("discovery");
+    assert_eq!(
+        report.storage_edges, 3,
+        "busy01 has not unmounted anything: {report:#?}"
+    );
+
+    let inventory = controller.store().load_inventory("lab").await.expect("inventory");
+    for name in ["andre01", "david01"] {
+        let entity = inventory.get(storage(name)).expect("the storage domain is still known");
+        assert_eq!(
+            entity.lifecycle_state,
+            sentinel::entity::LifecycleState::Active,
+            "{name} was marked stale because a mount report fell out of a window"
+        );
+    }
+}
