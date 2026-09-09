@@ -38,6 +38,13 @@ pub struct EntityStatus {
     /// name, and a name that resolves slowly fails the probes with short
     /// timeouts while leaving the longer ones passing.
     pub endpoint: Option<String>,
+    /// What the host reported about itself: CPUs, memory, GPUs.
+    ///
+    /// Shown because it is one half of every comparison against the
+    /// scheduler's configuration, and without it "Slurm expects 1 GPU, the
+    /// host reports 0" cannot be checked against what the host actually said.
+    /// `null` for a count means not stated, which is different from zero.
+    pub hardware: Option<serde_json::Value>,
     /// Inventory lifecycle.
     pub lifecycle: String,
     /// Capabilities in force.
@@ -189,6 +196,7 @@ fn describe(entity: &ManagedEntity, state: Option<&EntityState>) -> EntityStatus
                     .collect()
             })
             .unwrap_or_default(),
+        hardware: entity.metadata.get("hardware").filter(|v| !v.is_null()).cloned(),
         lifecycle: entity.lifecycle_state.as_str().to_string(),
         capabilities: entity.capabilities.iter().map(|c| c.as_str().to_string()).collect(),
     }
@@ -336,6 +344,23 @@ pub fn render_entity(entity: &EntityStatus) -> String {
     } else {
         for capability in &entity.capabilities {
             out.push_str(&format!("{capability}\n"));
+        }
+    }
+
+    if let Some(hardware) = &entity.hardware {
+        out.push_str("\nReported hardware:\n");
+        match hardware.as_object() {
+            Some(fields) => {
+                for (name, value) in fields {
+                    let shown = if value.is_null() {
+                        "(not stated)".to_string()
+                    } else {
+                        value.to_string()
+                    };
+                    out.push_str(&format!("{name}: {shown}\n"));
+                }
+            }
+            None => out.push_str(&format!("{hardware}\n")),
         }
     }
 

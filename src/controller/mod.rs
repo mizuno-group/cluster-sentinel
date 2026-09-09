@@ -31,6 +31,7 @@ pub use peers::observer_candidates as observer_candidates_for_test;
 pub use registration::{snapshot_from_registration, Registration};
 pub use server::{serve, ServeOptions, ServerHandle};
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::agent::SystemInspector;
@@ -41,7 +42,7 @@ use crate::incident::IncidentEngine;
 use crate::integrations::slurm::{observe, ScontrolClient};
 use crate::inventory::slurm::SlurmInventoryProvider;
 use crate::inventory::static_config::StaticConfigProvider;
-use crate::inventory::InventoryProvider;
+use crate::inventory::{Inventory, InventoryProvider};
 use crate::persistence::{SqliteStore, StoreError};
 use crate::state::{DebouncePolicy, ProbeMapping, StateComponent, StateEngine};
 
@@ -57,6 +58,28 @@ pub struct Controller {
     engine: StateEngine,
     diagnosis: DiagnosisEngine,
     incidents: IncidentEngine,
+    /// Which storage domains each host provides, from the `provides` edges.
+    ///
+    /// Cached from the graph so that every batch of observations arriving from
+    /// an agent does not have to reload the inventory to answer it.
+    storage_providers: BTreeMap<EntityId, Vec<EntityId>>,
+}
+
+/// Which storage entities each host provides.
+fn storage_providers(inventory: &Inventory) -> BTreeMap<EntityId, Vec<EntityId>> {
+    let mut by_host: BTreeMap<EntityId, Vec<EntityId>> = BTreeMap::new();
+    for edge in inventory.graph().edges() {
+        if edge.dependency_type != crate::dependency::DependencyType::Provides {
+            continue;
+        }
+        let (Some(storage), Some(host)) = (inventory.get(edge.source), inventory.get(edge.target)) else {
+            continue;
+        };
+        if storage.entity_type == EntityType::Storage && host.entity_type == EntityType::Host {
+            by_host.entry(host.id).or_default().push(storage.id);
+        }
+    }
+    by_host
 }
 
 impl Controller {
@@ -88,6 +111,8 @@ impl Controller {
         let mut incidents = IncidentEngine::new();
         incidents.seed(store.load_active_incidents(&config.environment).await?);
 
+        let storage_providers = storage_providers(&store.load_inventory(&config.environment).await?);
+
         Ok(Self {
             config,
             store,
@@ -95,6 +120,7 @@ impl Controller {
             engine,
             diagnosis: builtin_rules(),
             incidents,
+            storage_providers,
         })
     }
 

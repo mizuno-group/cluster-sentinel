@@ -940,6 +940,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn what_a_host_reported_about_its_hardware_is_visible() {
+        // Half of every comparison against the scheduler's configuration. It
+        // was not shown anywhere, so "Slurm expects 1 GPU, the host reports 0"
+        // could not be checked against what the host actually said -- and the
+        // obvious command to reach for returned null for everyone, which reads
+        // as a fault rather than as a missing field.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli = cli_for(&write_config(
+            dir.path(),
+            "\n[[entities]]\ntype = \"host\"\nname = \"node-a\"\n",
+        ));
+        discover(&cli, false).await.expect("discover");
+
+        let config = Config::load(&cli.config).expect("config");
+        let store = SqliteStore::open(&config.database.path).await.expect("store");
+        let id = crate::entity::EntityKey::new("lab", crate::entity::EntityType::Host, "node-a").entity_id();
+
+        let mut inventory = store.load_inventory("lab").await.expect("inventory");
+        let mut entity = inventory.get(id).expect("node-a").clone();
+        entity.metadata = serde_json::json!({"hardware": {"cpus": 64, "gpus": serde_json::Value::Null}});
+        inventory.insert_entity(entity);
+        store.save_inventory(&inventory).await.expect("save");
+
+        let report = status_cmd::load_report(&store, "lab").await.expect("report");
+        store.close().await;
+
+        let shown = report.entities.iter().find(|e| e.name == "node-a").expect("node-a");
+        let hardware = shown.hardware.as_ref().expect("hardware is reported");
+        assert_eq!(hardware["cpus"], 64);
+
+        let rendered = status_cmd::render_entity(shown);
+        assert!(rendered.contains("Reported hardware"), "{rendered}");
+        assert!(rendered.contains("cpus: 64"), "{rendered}");
+        assert!(
+            rendered.contains("gpus: (not stated)"),
+            "not stated is not zero, and the difference is the whole point: {rendered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_that_reported_no_hardware_shows_no_hardware_section() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli = cli_for(&write_config(
+            dir.path(),
+            "\n[[entities]]\ntype = \"host\"\nname = \"node-a\"\n",
+        ));
+        discover(&cli, false).await.expect("discover");
+
+        let config = Config::load(&cli.config).expect("config");
+        let store = SqliteStore::open(&config.database.path).await.expect("store");
+        let report = status_cmd::load_report(&store, "lab").await.expect("report");
+        store.close().await;
+
+        let shown = report.entities.iter().find(|e| e.name == "node-a").expect("node-a");
+        assert!(shown.hardware.is_none());
+        assert!(!status_cmd::render_entity(shown).contains("Reported hardware"));
+    }
+
+    #[tokio::test]
     async fn showing_an_unknown_entity_fails_cleanly() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cli = cli_for(&write_config(dir.path(), ""));

@@ -22,6 +22,36 @@ use std::path::{Path, PathBuf};
 
 use crate::config::DEFAULT_STATE_DIR;
 
+/// The unprivileged user the systemd units run as.
+///
+/// Named here as well as in the unit because the files this command writes
+/// have to be readable by it: a configuration owned by root at mode 0640 is
+/// one the service cannot open, and the symptom is a restart loop rather than
+/// anything that mentions permissions.
+pub const SERVICE_USER: &str = "sentinel";
+
+/// Look up a user's ids in the contents of `/etc/passwd`.
+///
+/// Parsed rather than resolved through libc, so this needs no C dependency and
+/// can be tested against a string. `None` means the user does not exist yet,
+/// which is the ordinary case on a fresh host: the operator creates it from
+/// the instructions this command prints, and the chown comes with it.
+pub fn passwd_ids(passwd: &str, user: &str) -> Option<(u32, u32)> {
+    passwd.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next()? == user).then_some(())?;
+        let uid = fields.nth(1)?.parse().ok()?;
+        let gid = fields.next()?.parse().ok()?;
+        Some((uid, gid))
+    })
+}
+
+/// The service user's ids on this host, if it exists.
+#[cfg(unix)]
+fn service_user_ids() -> Option<(u32, u32)> {
+    passwd_ids(&std::fs::read_to_string("/etc/passwd").ok()?, SERVICE_USER)
+}
+
 /// Where the cluster credential lives, beside the configuration it belongs to.
 ///
 /// Derived rather than fixed so that installing with `--config` somewhere else
@@ -222,6 +252,17 @@ fn place(path: &Path, contents: &str, mode: Option<u32>, options: Options) -> an
             #[cfg(not(unix))]
             let _ = mode;
         }
+
+        // Hand the file to the service user when that user already exists.
+        // Without this, installing a second role beside one that is already
+        // running -- an agent on the controller host, say -- writes a
+        // root-owned 0640 config the service cannot read, and systemd reports
+        // only a restart loop. Best effort: on a fresh host the user does not
+        // exist yet and the printed instructions still cover it.
+        #[cfg(unix)]
+        if let Some((uid, gid)) = service_user_ids() {
+            let _ = std::os::unix::fs::chown(path, Some(uid), Some(gid));
+        }
     }
     Ok(Written {
         path: path.to_path_buf(),
@@ -235,7 +276,12 @@ fn place(path: &Path, contents: &str, mode: Option<u32>, options: Options) -> an
 /// user, distributing a credential to other machines, and deciding when to
 /// start a service. Everything else has already happened by the time this
 /// prints.
-pub fn setup_instructions(role: &str, written: &[Written], credential_generated: bool) -> String {
+pub fn setup_instructions(
+    role: &str,
+    written: &[Written],
+    credential_generated: bool,
+    service_user_exists: bool,
+) -> String {
     let mut lines: Vec<String> = vec!["次に:".into(), String::new()];
     let mut step = 0;
     let push = |lines: &mut Vec<String>, step: &mut usize, title: &str, commands: &[String]| {
@@ -248,26 +294,47 @@ pub fn setup_instructions(role: &str, written: &[Written], credential_generated:
         lines.push(String::new());
     };
 
-    push(
-        &mut lines,
-        &mut step,
-        "サービスユーザーとディレクトリを作る:",
-        &[
-            "sudo useradd --system --no-create-home --shell /usr/sbin/nologin sentinel".into(),
-            format!("sudo install -d -o sentinel -g sentinel -m 0750 {DEFAULT_STATE_DIR}"),
-            "sudo chown -R sentinel:sentinel /etc/sentinel".into(),
-            // Without this the journal probe reports UNSUPPORTED on a host
-            // that has a perfectly readable journal, and the kernel events it
-            // exists to preserve are never collected.
-            "sudo usermod -aG systemd-journal sentinel   # journal.events を有効にする".into(),
-        ],
-    );
+    // A host that already runs one role has the user and the directory, and
+    // printing "create the service user" there invites the whole step to be
+    // skipped -- including the parts that still matter. This happens whenever
+    // a second role is installed beside a running one, so it is worth saying
+    // precisely which of it is already done.
+    if service_user_exists {
+        lines.push("  サービスユーザー sentinel は既にあります。".into());
+        lines.push("  この install が書いたファイルの所有者も設定済みです。".into());
+        lines.push(String::new());
+    } else {
+        push(
+            &mut lines,
+            &mut step,
+            "サービスユーザーとディレクトリを作る:",
+            &[
+                "sudo useradd --system --no-create-home --shell /usr/sbin/nologin sentinel".into(),
+                format!("sudo install -d -o sentinel -g sentinel -m 0750 {DEFAULT_STATE_DIR}"),
+                "sudo chown -R sentinel:sentinel /etc/sentinel".into(),
+                // Without this the journal probe reports UNSUPPORTED on a host
+                // that has a perfectly readable journal, and the kernel events
+                // it exists to preserve are never collected.
+                "sudo usermod -aG systemd-journal sentinel   # journal.events を有効にする".into(),
+            ],
+        );
+    }
 
     let token = written
         .iter()
         .find(|w| w.path.file_name().is_some_and(|n| n == "token"))
         .map(|w| w.path.display().to_string())
         .unwrap_or_else(|| "/etc/sentinel/token".into());
+
+    // Already present whenever another role is installed here, and telling
+    // someone to place a credential that is sitting next to the config they
+    // just wrote is how a working one gets replaced.
+    let token_exists = written
+        .iter()
+        .find(|w| w.path.file_name().is_some_and(|n| n == "token"))
+        .map(|w| w.path.clone())
+        .unwrap_or_else(|| PathBuf::from("/etc/sentinel/token"))
+        .exists();
 
     if credential_generated {
         push(
@@ -276,7 +343,7 @@ pub fn setup_instructions(role: &str, written: &[Written], credential_generated:
             "生成した credential を、同じ environment の全 host に同じ内容で配る:",
             &[format!("sudo scp {token} <host>:/etc/sentinel/token")],
         );
-    } else {
+    } else if !token_exists {
         push(
             &mut lines,
             &mut step,
@@ -416,7 +483,20 @@ pub fn run(role: &str, output_dir: &Path, config: &Path, options: Options<'_>) -
         println!("{:<40} {}", entry.path.display(), entry.outcome.label());
     }
     println!();
-    print!("{}", setup_instructions(role, &written, credential_generated));
+    let service_user_exists = {
+        #[cfg(unix)]
+        {
+            service_user_ids().is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    };
+    print!(
+        "{}",
+        setup_instructions(role, &written, credential_generated, service_user_exists)
+    );
 
     Ok(0)
 }
@@ -755,12 +835,79 @@ mod tests {
             path: PathBuf::from("/etc/sentinel/config.toml"),
             outcome: Outcome::Created,
         }];
-        let instructions = setup_instructions("controller", &written, true);
+        let instructions = setup_instructions("controller", &written, true, false);
         assert!(instructions.contains("useradd --system"), "{instructions}");
         assert!(instructions.contains("config check"), "{instructions}");
         assert!(
             instructions.contains("全 host に同じ内容で"),
             "the credential must be described as cluster-wide: {instructions}"
+        );
+    }
+
+    #[test]
+    fn passwd_is_parsed_for_the_service_users_ids() {
+        let passwd = "root:x:0:0:root:/root:/bin/bash\n\
+                      sentinel:x:999:998::/nonexistent:/usr/sbin/nologin\n";
+        assert_eq!(passwd_ids(passwd, SERVICE_USER), Some((999, 998)));
+        assert_eq!(passwd_ids(passwd, "root"), Some((0, 0)));
+        assert_eq!(passwd_ids(passwd, "nobody"), None, "a user that is not there");
+        assert_eq!(passwd_ids("", SERVICE_USER), None);
+        assert_eq!(passwd_ids("sentinel:x:notanumber:998::\n", SERVICE_USER), None);
+    }
+
+    #[test]
+    fn a_second_role_beside_a_running_one_is_not_told_to_create_what_exists() {
+        // Installing an agent on the controller host printed "create the
+        // service user" as step one, which reads as skippable when the user is
+        // already there -- and buried in that step was the chown the new files
+        // needed. The service then failed to read its own configuration and
+        // systemd reported a restart loop.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = dir.path().join("token");
+        std::fs::write(&token, "existing").expect("token");
+        let written = vec![
+            Written {
+                path: dir.path().join("agent.toml"),
+                outcome: Outcome::Created,
+            },
+            Written {
+                path: token,
+                outcome: Outcome::Kept,
+            },
+        ];
+
+        let instructions = setup_instructions("agent", &written, false, true);
+
+        assert!(!instructions.contains("useradd"), "{instructions}");
+        assert!(
+            !instructions.contains("install -o sentinel -g sentinel -m 0400"),
+            "a credential that is already there must not be replaced: {instructions}"
+        );
+        assert!(instructions.contains("所有者も設定済み"), "{instructions}");
+        // The steps that still matter are still there.
+        assert!(instructions.contains("config check"), "{instructions}");
+        assert!(
+            instructions.contains("systemctl enable --now sentinel-agent"),
+            "{instructions}"
+        );
+    }
+
+    #[test]
+    fn a_fresh_host_is_still_told_everything() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let written = vec![Written {
+            path: dir.path().join("config.toml"),
+            outcome: Outcome::Created,
+        }];
+
+        let instructions = setup_instructions("agent", &written, false, false);
+
+        assert!(instructions.contains("useradd"), "{instructions}");
+        assert!(instructions.contains("chown -R sentinel:sentinel"), "{instructions}");
+        assert!(instructions.contains("systemd-journal"), "{instructions}");
+        assert!(
+            instructions.contains("install -o sentinel -g sentinel -m 0400"),
+            "no credential here yet, so it has to be placed: {instructions}"
         );
     }
 }

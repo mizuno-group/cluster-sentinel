@@ -193,7 +193,15 @@ impl Controller {
         let ingested = self.store().ingest_observations(&observations).await?;
         report.observations = ingested.inserted;
 
+        // Refreshed here because the graph has just been merged: a storage
+        // domain discovered this cycle should be answered by this cycle's
+        // observations, not the next one's.
+        self.storage_providers = super::storage_providers(&inventory);
+
         report.transitions = self.engine.ingest_all(&observations);
+        report
+            .transitions
+            .extend(self.engine.ingest_all(&self.storage_views(&observations)));
         for transition in &report.transitions {
             self.store().save_state_transition(transition).await?;
         }
@@ -300,12 +308,57 @@ impl Controller {
     /// Record observations and update state from them.
     ///
     /// Shared by the discovery cycle and by agent ingestion in M2.
+    /// The server-side storage observations, re-aimed at the storage domains
+    /// the host provides.
+    ///
+    /// A storage entity is a concept: nothing probes it directly, so its
+    /// health was permanently `unknown` and it sat in `status` saying nothing
+    /// for as long as it existed. What it needs is exactly what its provider's
+    /// export probes already found out.
+    ///
+    /// Only the **server** side is copied. A host can be both a fileserver and
+    /// an NFS client -- a compute node exporting a scratch tree, for instance
+    /// -- and both sides feed the same `storage` component on the host, so
+    /// mirroring the component wholesale would report a wedged *client* mount
+    /// as a failure of what that host *serves*. That points at the wrong
+    /// machine, which is the specific mistake this system exists to avoid.
+    ///
+    /// The copy keeps the original's id, so the storage entity's evidence
+    /// leads to a real stored observation rather than to a synthetic one, and
+    /// nothing extra is written to the database. Feeding these through the
+    /// state engine rather than computing a health directly is what gives them
+    /// the same debounce as everything else: one dropped packet is not an
+    /// outage here either.
+    pub fn storage_views(&self, observations: &[Observation]) -> Vec<Observation> {
+        const SERVER_PROBES: [&str; 2] = [
+            crate::probes::nfs::PROBE_SERVER_PORT,
+            crate::probes::nfs::PROBE_SERVER_EXPORTS,
+        ];
+
+        let mut views = Vec::new();
+        for observation in observations {
+            if !SERVER_PROBES.contains(&observation.probe_id.as_str()) {
+                continue;
+            }
+            let Some(storages) = self.storage_providers.get(&observation.target_entity) else {
+                continue;
+            };
+            for storage in storages {
+                let mut view = observation.clone();
+                view.target_entity = *storage;
+                views.push(view);
+            }
+        }
+        views
+    }
+
     pub async fn ingest_observations(
         &mut self,
         observations: &[Observation],
     ) -> Result<Vec<StateTransition>, StoreError> {
         self.store().ingest_observations(observations).await?;
-        let transitions = self.engine.ingest_all(observations);
+        let mut transitions = self.engine.ingest_all(observations);
+        transitions.extend(self.engine.ingest_all(&self.storage_views(observations)));
         for transition in &transitions {
             self.store().save_state_transition(transition).await?;
         }
