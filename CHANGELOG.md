@@ -20,6 +20,30 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.16
+
+* **v0.3.15 の観測ウィンドウ変更に伴う regression の修正。**
+  pseudo-cluster の acceptance が捕まえた
+  （`HOST_UNREACHABLE was not detected (saw: PATH_SPECIFIC_NETWORK_FAILURE)`）。
+
+  「直近 32 件」というウィンドウは、**読み込む量**と
+  **どれだけ古い観測まで採用するか**という別々の 2 つを
+  たまたま同時に縛っていた。v0.3.15 は前者を
+  「probe ごと・observer ごとの最新 1 件」に直したが、
+  後者を一緒に外してしまっていた。
+
+  結果、**host を完全に停止したのに「経路障害」と報告された。**
+  その host の観測をやめた observer の「到達できた」という
+  最後の回答が、永久に最新のまま残るため。
+
+  * 観測の鮮度を、**その probe 自身の間隔**を基準に判定するようにした。
+    古さは相対的で、1 分前の reachability の回答には価値がないが、
+    1 分前の Slurm node view は現在の値。件数によるウィンドウでは
+    これを表現できない。
+  * 既定では probe 間隔の 4 倍を過ぎた観測は証拠として採用しない
+    （reachability なら 20 秒、Slurm node view なら 20 分）。
+    1 回落とすのは揺らぎ、4 回落とすのは probe が止まっている。
+
 ## v0.3.15
 
 実クラスタで「GPU が 1 のはずが 0」という通知が頻発し、

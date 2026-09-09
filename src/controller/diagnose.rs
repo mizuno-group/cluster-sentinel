@@ -15,6 +15,37 @@ use crate::state::{Classification, EntityState};
 
 use super::Controller;
 
+/// How many of its own intervals an observation may lag before it stops being
+/// evidence about now.
+///
+/// Missing one round is a hiccup; missing four is a probe that has stopped
+/// running -- because the observer was reassigned, or is itself gone. Its last
+/// answer must not keep voting. Four leaves room for jitter and a slow cycle
+/// while still expiring a reachability answer in twenty seconds.
+const STALE_AFTER_INTERVALS: u32 = 4;
+
+/// How long each probe's answer stays evidence.
+///
+/// Derived from the probe's own cadence, because staleness is relative: a
+/// reachability answer from a minute ago is worthless, and a Slurm node view
+/// from a minute ago is current. A count-based window cannot express that --
+/// which is what made a stopped host look like a broken path, since a
+/// reassigned observer's last "reachable" stayed the newest one it had
+/// forever.
+fn freshness_horizons(config: &crate::config::Config) -> HashMap<String, chrono::Duration> {
+    let mut horizons = HashMap::new();
+    for entry in crate::probes::catalog::catalog() {
+        let mut definition = entry.definition.clone();
+        config.probes.apply(&mut definition);
+        let window = definition.interval * STALE_AFTER_INTERVALS;
+        horizons.insert(
+            definition.id.as_str().to_string(),
+            chrono::Duration::from_std(window).unwrap_or_else(|_| chrono::Duration::hours(1)),
+        );
+    }
+    horizons
+}
+
 impl Controller {
     /// Run every diagnosis rule against the current picture.
     pub async fn diagnose(&self) -> Result<Vec<Diagnosis>, StoreError> {
@@ -35,10 +66,24 @@ impl Controller {
                 .collect();
         }
 
+        // Observations that are no longer evidence about now are left out
+        // rather than weighed: a rule cannot tell a stale answer from a
+        // current one, and every rule here treats what it is given as the
+        // present.
+        let horizons = freshness_horizons(self.config());
+        // Observations this controller produces itself arrive once per
+        // discovery cycle, not on a probe schedule.
+        let fallback = chrono::Duration::from_std(self.config().controller.inventory_interval * STALE_AFTER_INTERVALS)
+            .unwrap_or_else(|_| chrono::Duration::hours(1));
+        let now = crate::time::now();
+
         let mut observations = ObservationIndex::new();
         for entity in inventory.entities() {
             for observation in self.store().latest_observations(entity.id).await? {
-                observations.insert(observation);
+                let horizon = horizons.get(observation.probe_id.as_str()).copied().unwrap_or(fallback);
+                if now - observation.finished_at <= horizon {
+                    observations.insert(observation);
+                }
             }
         }
 
