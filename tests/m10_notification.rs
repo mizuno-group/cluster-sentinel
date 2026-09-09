@@ -72,6 +72,7 @@ async fn cluster() -> Controller {
         webhooks: vec![WebhookConfig {
             name: "test".into(),
             url: "http://example.org/hook".into(),
+            format: Default::default(),
         }],
         min_severity: "warning".into(),
     };

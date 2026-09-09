@@ -399,6 +399,22 @@ fn default_min_severity() -> String {
     "warning".to_string()
 }
 
+/// How a destination wants its payload shaped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebhookFormat {
+    /// Flat, self-describing JSON, with the message also under `text` and
+    /// `content` so the common services accept it.
+    #[default]
+    Generic,
+    /// Slack Block Kit: a coloured attachment, a heading, and the detail
+    /// formatted rather than pasted in as one paragraph.
+    ///
+    /// Worth its own shape because the difference at three in the morning is
+    /// between a wall of text and a red bar with the host name in bold.
+    Slack,
+}
+
 /// One webhook destination.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -407,6 +423,9 @@ pub struct WebhookConfig {
     pub name: String,
     /// Where to POST.
     pub url: String,
+    /// How to shape the payload. Defaults to `generic`.
+    #[serde(default)]
+    pub format: WebhookFormat,
 }
 
 /// Integration discovery toggles.

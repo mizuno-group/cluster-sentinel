@@ -17,6 +17,23 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.11 での追加
+
+**Slack 向けの整形**（`format = "slack"`）。
+
+```toml
+[[notification.webhooks]]
+name   = "ops"
+url    = "https://hooks.slack.com/services/..."
+format = "slack"
+```
+
+色つきの帯・見出し・太字・整形済みの詳細で届きます。
+復旧は緑（重大度に関わらず）、critical は赤、warning は黄。
+色が最初に伝えるべきなのは「始まったのか終わったのか」だからです。
+
+既定は `generic` のままなので、既存の宛先の挙動は変わりません。
+
 ## v0.3.10 での修正
 
 **Slack への通知が 400 で弾かれていました。**

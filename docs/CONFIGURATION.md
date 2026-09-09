@@ -215,7 +215,41 @@ blocking syscall が積み上がらないようにするためであり
 override は controller の remote probe と agent の peer probe にも同じく適用されます。
 観測者ごとに頻度が違うと、quorum が異なる頻度の観測を比較することになるためです。
 
-#### 送信される内容
+| キー | 型 | 既定値 | 意味 |
+| --- | --- | --- | --- |
+| `name` | 文字列 | *(必須)* | log と重複排除に使う名前 |
+| `url` | 文字列 | *(必須)* | POST 先 |
+| `format` | `generic` / `slack` | `generic` | payload の形 |
+
+#### `format = "slack"`
+
+Slack Block Kit で送ります。**色つきの帯・見出し・太字・整形済みの詳細**になります。
+
+```toml
+[[notification.webhooks]]
+name   = "ops"
+url    = "https://hooks.slack.com/services/..."
+format = "slack"
+```
+
+| 状態 | 色 | アイコン |
+| --- | --- | --- |
+| 復旧 | 緑 | ✅ |
+| critical | 赤 | 🔴 |
+| warning | 黄 | 🟡 |
+| info | 灰 | 🔵 |
+
+**復旧は重大度に関わらず緑**です。色が最初に伝えるべきなのは
+「始まったのか終わったのか」だからです。
+
+見出しには重大度だけを置き、要約から `CRITICAL: ` のような接頭辞を外します
+（色つきの帯がすでに言っているものを繰り返すと、
+スマホで最も読まれる 1 行目を浪費するため）。
+
+Slack は長すぎる `header` を切り詰めずに**拒否する**ので、
+文字数はすべて上限内に収めてあります。
+
+#### 送信される内容（`format = "generic"`）
 
 `Content-Type: application/json` の POST です。
 

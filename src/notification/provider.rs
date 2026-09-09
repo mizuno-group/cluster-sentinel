@@ -11,6 +11,8 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use super::Notification;
+use crate::config::WebhookFormat;
+use crate::incident::Severity;
 
 /// Why a notification could not be delivered.
 #[derive(Debug, Error)]
@@ -64,7 +66,23 @@ pub trait NotificationProvider: Send + Sync {
 pub struct WebhookProvider {
     name: String,
     url: String,
+    format: WebhookFormat,
     http: reqwest::Client,
+}
+
+/// Slack's limit on a `header` block, which it rejects rather than truncates.
+const SLACK_HEADER_LIMIT: usize = 150;
+/// Slack's limit on a `section` text block.
+const SLACK_SECTION_LIMIT: usize = 3000;
+
+/// Cut to a limit on a character boundary, marking that something was cut.
+fn truncated(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(limit.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
 }
 
 impl WebhookProvider {
@@ -83,8 +101,15 @@ impl WebhookProvider {
         Ok(Self {
             name: name.into(),
             url,
+            format: WebhookFormat::default(),
             http,
         })
+    }
+
+    /// Builder: shape the payload for a particular service.
+    pub fn with_format(mut self, format: WebhookFormat) -> Self {
+        self.format = format;
+        self
     }
 
     /// The destination URL.
@@ -115,6 +140,106 @@ impl WebhookProvider {
         text
     }
 
+    /// Colour and icon for a notification, by what it is telling you.
+    ///
+    /// Colour is the thing a person reads before any words, so it carries the
+    /// one distinction that matters at a glance: is this starting or ending.
+    /// A recovery is green whatever its severity.
+    fn appearance(notification: &Notification) -> (&'static str, &'static str) {
+        if notification.trigger.is_recovery() {
+            return ("#2e7d32", "\u{2705}");
+        }
+        match notification.severity {
+            Severity::Critical => ("#d32f2f", "\u{1f534}"),
+            Severity::Warning => ("#f9a825", "\u{1f7e1}"),
+            Severity::Info => ("#546e7a", "\u{1f535}"),
+        }
+    }
+
+    /// The summary without the severity word the heading already carries.
+    ///
+    /// Titles are built as `SEVERITY: summary`. Repeating the severity beside
+    /// a coloured bar that already says it wastes the first line, which on a
+    /// phone is most of what gets read.
+    fn summary(notification: &Notification) -> &str {
+        notification
+            .title
+            .split_once(": ")
+            .map(|(_, rest)| rest)
+            .unwrap_or(&notification.title)
+    }
+
+    /// Slack Block Kit: a coloured attachment with the detail laid out.
+    fn slack_payload(notification: &Notification) -> serde_json::Value {
+        let (color, icon) = Self::appearance(notification);
+        let heading = if notification.trigger.is_recovery() {
+            format!("{icon} RESOLVED")
+        } else {
+            format!("{icon} {}", notification.severity.to_string().to_uppercase())
+        };
+
+        let mut blocks = vec![
+            serde_json::json!({
+                "type": "header",
+                "text": { "type": "plain_text", "text": truncated(&heading, SLACK_HEADER_LIMIT), "emoji": true }
+            }),
+            serde_json::json!({
+                "type": "section",
+                "text": { "type": "mrkdwn", "text": truncated(&format!("*{}*", Self::summary(notification)), SLACK_SECTION_LIMIT) }
+            }),
+        ];
+
+        // The detail as a preformatted block: it is machine-written, aligned,
+        // and mangled by Slack's paragraph wrapping otherwise. A fence inside
+        // the text would close the block early and spill the rest as markup,
+        // so any is neutralised first.
+        if !notification.body.trim().is_empty() {
+            let body = notification.body.trim().replace("```", "'\u{2019}'");
+            blocks.push(serde_json::json!({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": truncated(&format!("```{body}```"), SLACK_SECTION_LIMIT)
+                }
+            }));
+        }
+
+        if !notification.recommended_actions.is_empty() {
+            let actions = notification
+                .recommended_actions
+                .iter()
+                .map(|a| format!("• `{a}`"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            blocks.push(serde_json::json!({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": truncated(&format!("*Suggested investigation (read-only)*\n{actions}"), SLACK_SECTION_LIMIT)
+                }
+            }));
+        }
+
+        blocks.push(serde_json::json!({
+            "type": "context",
+            "elements": [{
+                "type": "mrkdwn",
+                "text": format!("cluster-sentinel • `{}` • {}", notification.fingerprint, notification.created_at)
+            }]
+        }));
+
+        serde_json::json!({
+            // Also at the top level: Slack uses it for the notification
+            // preview and for clients that do not render blocks.
+            "text": truncated(&notification.title, SLACK_SECTION_LIMIT),
+            "attachments": [{
+                "color": color,
+                "fallback": truncated(&notification.title, SLACK_SECTION_LIMIT),
+                "blocks": blocks
+            }]
+        })
+    }
+
     /// The JSON body sent for a notification.
     ///
     /// Deliberately flat and self-describing: a receiver should not need to
@@ -125,6 +250,14 @@ impl WebhookProvider {
     /// dedicated provider per service would render better -- colour, threads,
     /// buttons -- but a webhook that needs a translator in front of it is a
     /// webhook most people will not get working at all.
+    pub fn payload_for(format: WebhookFormat, notification: &Notification) -> serde_json::Value {
+        match format {
+            WebhookFormat::Slack => Self::slack_payload(notification),
+            WebhookFormat::Generic => Self::payload(notification),
+        }
+    }
+
+    /// The generic JSON body.
     pub fn payload(notification: &Notification) -> serde_json::Value {
         let message = Self::message(notification);
         serde_json::json!({
@@ -156,7 +289,7 @@ impl NotificationProvider for WebhookProvider {
         let response = self
             .http
             .post(&self.url)
-            .json(&Self::payload(notification))
+            .json(&Self::payload_for(self.format, notification))
             .send()
             .await
             .map_err(|e| ProviderError::Unreachable {
@@ -192,6 +325,103 @@ mod tests {
                 .recommending(vec!["systemctl status nfs-server".into()]),
         );
         Notification::for_incident(&incident, trigger)
+    }
+
+    #[test]
+    fn slack_gets_a_coloured_attachment_with_blocks() {
+        // Slack accepts a payload with text, blocks or attachments. This has
+        // all three routes covered, and the colour is what a person reads
+        // before any words.
+        let payload = WebhookProvider::slack_payload(&notification(Trigger::Opened));
+
+        assert!(payload["text"].as_str().is_some_and(|t| !t.is_empty()));
+        let attachment = &payload["attachments"][0];
+        assert!(attachment["color"].as_str().is_some_and(|c| c.starts_with('#')));
+        assert!(attachment["blocks"].as_array().is_some_and(|b| !b.is_empty()));
+    }
+
+    #[test]
+    fn a_recovery_is_green_whatever_its_severity() {
+        // The distinction a colour has to carry is starting versus ending.
+        // A critical incident that has just resolved is good news.
+        let mut resolved = notification(Trigger::Resolved);
+        resolved.severity = Severity::Critical;
+        let (color, icon) = WebhookProvider::appearance(&resolved);
+        assert_eq!(color, "#2e7d32");
+        assert_eq!(icon, "\u{2705}");
+
+        let (color, _) = WebhookProvider::appearance(&notification(Trigger::Opened));
+        assert_ne!(color, "#2e7d32");
+    }
+
+    #[test]
+    fn the_heading_does_not_repeat_what_the_colour_says() {
+        // Titles are `SEVERITY: summary`, and the heading already carries the
+        // severity beside a coloured bar. Repeating it wastes the first line,
+        // which on a phone is most of what gets read.
+        let mut opened = notification(Trigger::Opened);
+        opened.title = "CRITICAL: filesrv01 is up but the export port is not answering".into();
+        assert_eq!(
+            WebhookProvider::summary(&opened),
+            "filesrv01 is up but the export port is not answering"
+        );
+
+        // A title with no prefix is left alone rather than losing its first clause.
+        opened.title = "something happened".into();
+        assert_eq!(WebhookProvider::summary(&opened), "something happened");
+    }
+
+    #[test]
+    fn a_code_fence_in_the_body_cannot_escape_the_block() {
+        // A fence inside the text would close the preformatted block early and
+        // spill the rest as markup.
+        let mut n = notification(Trigger::Opened);
+        n.body = "before ``` after".into();
+
+        let payload = WebhookProvider::slack_payload(&n);
+        let text = payload["attachments"][0]["blocks"][2]["text"]["text"]
+            .as_str()
+            .expect("body block");
+        assert_eq!(text.matches("```").count(), 2, "{text}");
+    }
+
+    #[test]
+    fn blocks_stay_inside_slacks_limits() {
+        // Slack rejects an over-long header rather than truncating it, so a
+        // long diagnosis would mean no notification at all.
+        let mut long = notification(Trigger::Opened);
+        long.title = "X".repeat(400);
+        long.body = "Y".repeat(8000);
+        long.recommended_actions = vec!["Z".repeat(5000)];
+
+        let payload = WebhookProvider::slack_payload(&long);
+        for block in payload["attachments"][0]["blocks"].as_array().expect("blocks") {
+            if let Some(text) = block["text"]["text"].as_str() {
+                let limit = if block["type"] == "header" {
+                    SLACK_HEADER_LIMIT
+                } else {
+                    SLACK_SECTION_LIMIT
+                };
+                assert!(
+                    text.chars().count() <= limit,
+                    "{} block: {} chars",
+                    block["type"],
+                    text.chars().count()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_format_decides_the_shape() {
+        let n = notification(Trigger::Opened);
+        assert!(WebhookProvider::payload_for(WebhookFormat::Slack, &n)["attachments"].is_array());
+        assert!(WebhookProvider::payload_for(WebhookFormat::Generic, &n)["attachments"].is_null());
+        // Generic keeps the structured fields a script would route on.
+        assert_eq!(
+            WebhookProvider::payload_for(WebhookFormat::Generic, &n)["source"],
+            "cluster-sentinel"
+        );
     }
 
     #[test]

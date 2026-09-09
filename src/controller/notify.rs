@@ -50,7 +50,7 @@ pub fn providers_from_config(config: &crate::config::Config) -> Vec<Arc<dyn Noti
         .iter()
         .filter_map(|webhook| {
             match WebhookProvider::new(&webhook.name, &webhook.url, std::time::Duration::from_secs(10)) {
-                Ok(provider) => Some(Arc::new(provider) as Arc<dyn NotificationProvider>),
+                Ok(provider) => Some(Arc::new(provider.with_format(webhook.format)) as Arc<dyn NotificationProvider>),
                 Err(error) => {
                     // Refuse the destination, keep the controller running. A
                     // mistyped URL must not stop monitoring.
@@ -221,6 +221,7 @@ mod tests {
             webhooks: vec![WebhookConfig {
                 name: "test".into(),
                 url: "http://example.org/hook".into(),
+                format: Default::default(),
             }],
             min_severity: min_severity.into(),
         };
@@ -435,10 +436,12 @@ mod tests {
             WebhookConfig {
                 name: "bad".into(),
                 url: "not-a-url".into(),
+                format: Default::default(),
             },
             WebhookConfig {
                 name: "good".into(),
                 url: "https://example.org/hook".into(),
+                format: Default::default(),
             },
         ];
 
