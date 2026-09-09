@@ -17,6 +17,20 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.12 での追加
+
+**`[notification] min_interval`**（既定 `1s`）。同一宛先への送信間隔の下限です。
+
+1 つの障害が依存先を巻き込むと、1 回の診断で複数の通知が発生します。
+webhook は共有された rate-limited な資源で、Slack は概ね毎秒 1 通、
+超えると 429 を返します。**間引くのではなく間隔を空けます**——
+落とすと、落ちたのが肝心の 1 通かもしれないからです。
+
+```toml
+[notification]
+min_interval = "1s"
+```
+
 ## v0.3.11 での追加
 
 **Slack 向けの整形**（`format = "slack"`）。

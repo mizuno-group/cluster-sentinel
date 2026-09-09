@@ -215,6 +215,21 @@ blocking syscall が積み上がらないようにするためであり
 override は controller の remote probe と agent の peer probe にも同じく適用されます。
 観測者ごとに頻度が違うと、quorum が異なる頻度の観測を比較することになるためです。
 
+`[notification]` 自体の設定:
+
+| キー | 型 | 既定値 | 意味 |
+| --- | --- | --- | --- |
+| `min_severity` | 文字列 | `warning` | これ未満は送らない（復旧通知は常に送る） |
+| `min_interval` | duration | `1s` | **同一宛先への送信間隔の下限** |
+
+`min_interval` は**送信を間引くのではなく、間隔を空けます。**
+1 つの障害が依存先を巻き込むと 1 回の診断で複数の通知が発生し、
+webhook は共有された rate-limited な資源です
+（Slack は概ね毎秒 1 通で、超えると 429 を返します）。
+**落とすと、落ちたのが肝心の 1 通かもしれません。**
+
+`[[notification.webhooks]]` の設定:
+
 | キー | 型 | 既定値 | 意味 |
 | --- | --- | --- | --- |
 | `name` | 文字列 | *(必須)* | log と重複排除に使う名前 |

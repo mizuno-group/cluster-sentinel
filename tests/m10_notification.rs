@@ -75,6 +75,8 @@ async fn cluster() -> Controller {
             format: Default::default(),
         }],
         min_severity: "warning".into(),
+        // Tests must not spend a second per notification.
+        min_interval: std::time::Duration::ZERO,
     };
 
     let store = SqliteStore::open_in_memory().await.expect("store");
@@ -130,6 +132,60 @@ fn incident(severity: Severity, affected: &[&str]) -> Incident {
         Diagnosis::new(kind::NFS_SERVICE_FAILURE, "storage.service_failure", Confidence::High)
             .with_summary("the export port is not answering")
             .affecting(affected.iter().map(|n| host(n)).collect::<Vec<_>>()),
+    );
+    incident
+}
+
+#[tokio::test]
+async fn a_burst_is_spaced_rather_than_dropped() {
+    // One fault takes its dependants with it, so a single pass can produce
+    // many notifications. A webhook is a shared, rate-limited resource --
+    // Slack allows about one a second -- and sending them as fast as they are
+    // produced is how the one that mattered gets a 429.
+    let spacing = std::time::Duration::from_millis(60);
+    let mut controller = cluster().await;
+    controller.config_mut().notification.min_interval = spacing;
+
+    let (provider, sent) = recording();
+    // Three separate causes, so nothing is deduplicated away.
+    let update = IncidentUpdate {
+        opened: vec![
+            incident_named("cause:a", Severity::Critical),
+            incident_named("cause:b", Severity::Critical),
+            incident_named("cause:c", Severity::Critical),
+        ],
+        ..Default::default()
+    };
+
+    let started = std::time::Instant::now();
+    let outcome = controller
+        .notify(
+            &update,
+            &[provider],
+            &mut Deduplicator::new(),
+            &MaintenanceWindows::new(),
+        )
+        .await
+        .expect("notify");
+    let elapsed = started.elapsed();
+
+    // Every one arrives: spaced, not discarded.
+    assert_eq!(outcome.sent, 3);
+    assert_eq!(sent.lock().await.len(), 3);
+    // Three sends means at least two gaps.
+    assert!(
+        elapsed >= spacing * 2,
+        "sent in {elapsed:?}, faster than the spacing allows"
+    );
+}
+
+/// An incident with its own cause, so two of them are not the same news.
+fn incident_named(fingerprint: &str, severity: Severity) -> Incident {
+    let mut incident = Incident::open(fingerprint, severity);
+    incident.add_diagnosis(
+        Diagnosis::new(kind::NFS_SERVICE_FAILURE, "storage.service_failure", Confidence::High)
+            .with_summary("the export port is not answering")
+            .affecting(vec![host("fs1")]),
     );
     incident
 }

@@ -113,6 +113,14 @@ impl Controller {
         &self.config
     }
 
+    /// The configuration, mutably.
+    ///
+    /// For tests that need to vary a setting the daemon reads at run time,
+    /// such as how far apart notifications are spaced.
+    pub fn config_mut(&mut self) -> &mut Config {
+        &mut self.config
+    }
+
     /// The database.
     pub fn store(&self) -> &SqliteStore {
         &self.store

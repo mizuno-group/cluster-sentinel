@@ -161,6 +161,7 @@ impl Default for Config {
             notification: NotificationConfig {
                 webhooks: Vec::new(),
                 min_severity: default_min_severity(),
+                min_interval: default_min_interval(),
             },
             retention: RetentionConfig::default(),
             tls: TlsConfig::default(),
@@ -391,6 +392,23 @@ pub struct NotificationConfig {
     /// Minimum severity worth sending.
     #[serde(default = "default_min_severity")]
     pub min_severity: String,
+    /// Shortest gap between two sends to the same destination.
+    ///
+    /// One fault can produce many notifications at once -- a fileserver
+    /// failing takes its dependants with it -- and a webhook is a shared,
+    /// rate-limited resource. Slack allows roughly one message per second and
+    /// starts returning 429 beyond it, at which point the notification that
+    /// mattered is the one that got dropped.
+    ///
+    /// Sends are spaced, never discarded: a burst arrives more slowly rather
+    /// than partly.
+    #[serde(default = "default_min_interval", with = "humantime_serde")]
+    pub min_interval: std::time::Duration,
+}
+
+fn default_min_interval() -> std::time::Duration {
+    // Slack's documented limit for incoming webhooks.
+    std::time::Duration::from_secs(1)
 }
 
 fn default_min_severity() -> String {

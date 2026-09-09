@@ -82,7 +82,9 @@ impl Controller {
         }
 
         let floor = min_severity(self.config());
+        let spacing = self.config().notification.min_interval;
         let notifications = notifications_for(update);
+        let mut last_send: Option<std::time::Instant> = None;
 
         for notification in &notifications {
             // A recovery is always worth hearing, whatever its severity: an
@@ -102,6 +104,18 @@ impl Controller {
                     outcome.deduplicated += 1;
                     continue;
                 }
+
+                // Spaced, not dropped. One fault can produce many
+                // notifications at once, and a webhook is a shared,
+                // rate-limited resource: sending them as fast as they are
+                // produced is how the one that mattered gets a 429.
+                if let Some(previous) = last_send {
+                    let elapsed = previous.elapsed();
+                    if elapsed < spacing {
+                        tokio::time::sleep(spacing - elapsed).await;
+                    }
+                }
+                last_send = Some(std::time::Instant::now());
 
                 match provider.send(notification).await {
                     Ok(()) => {
@@ -224,6 +238,8 @@ mod tests {
                 format: Default::default(),
             }],
             min_severity: min_severity.into(),
+            // Tests must not spend a second per notification.
+            min_interval: std::time::Duration::ZERO,
         };
         Controller::new(config, SqliteStore::open_in_memory().await.expect("store"))
             .await

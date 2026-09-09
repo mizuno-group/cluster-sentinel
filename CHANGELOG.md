@@ -20,6 +20,15 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.12
+
+* **`[notification] min_interval`**（新規、既定 `1s`）。
+  同一宛先への送信間隔の下限。**間引くのではなく間隔を空ける。**
+  1 つの障害が依存先を巻き込むと 1 回の診断で複数の通知が発生し、
+  webhook は共有された rate-limited な資源
+  （Slack は概ね毎秒 1 通で、超えると 429）。
+  落とすと、落ちたのが肝心の 1 通かもしれない。
+
 ## v0.3.11
 
 * **`[[notification.webhooks]] format`**（新規）。宛先ごとに payload の形を選ぶ。
