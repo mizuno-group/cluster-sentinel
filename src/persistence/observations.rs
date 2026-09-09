@@ -83,6 +83,40 @@ impl SqliteStore {
         rows.iter().map(decode_observation).collect()
     }
 
+    /// The newest observation of each probe, from each observer, for one
+    /// entity.
+    ///
+    /// This exists because "the last N observations" is the wrong window for
+    /// diagnosis. Probes run at wildly different cadences -- reachability
+    /// every five seconds from every observer, the Slurm node view every five
+    /// minutes -- so a fixed-size recent window fills with the fast ones and
+    /// evicts the slow ones. A rule comparing the two then sees the slow side
+    /// only in the moments just after it lands, and its diagnosis appears and
+    /// disappears in step with the eviction rather than with the cluster.
+    /// That looks exactly like a flapping fault, and it was reported as one.
+    pub async fn latest_observations(&self, entity: EntityId) -> Result<Vec<Observation>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, probe_id, target_entity_id, observer_entity_id, agent_session_id, started_at,
+                    finished_at, duration_ms, status, payload, evidence, error_code, error_message
+             FROM (
+                 SELECT id, probe_id, target_entity_id, observer_entity_id, agent_session_id, started_at,
+                        finished_at, duration_ms, status, payload, evidence, error_code, error_message,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY probe_id, COALESCE(observer_entity_id, '')
+                            ORDER BY finished_at DESC, id DESC
+                        ) AS rank
+                 FROM observations
+                 WHERE target_entity_id = ?
+             )
+             WHERE rank = 1",
+        )
+        .bind(entity.to_string())
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.iter().map(decode_observation).collect()
+    }
+
     /// How many observations are stored for one entity.
     pub async fn observation_count(&self, entity: EntityId) -> Result<i64, StoreError> {
         let row = sqlx::query("SELECT COUNT(*) AS n FROM observations WHERE target_entity_id = ?")
@@ -355,6 +389,72 @@ mod tests {
 
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], original);
+    }
+
+    #[tokio::test]
+    async fn a_slow_probe_is_not_evicted_by_a_flood_of_fast_ones() {
+        // The bug this query exists for. Reachability runs every five seconds
+        // from every observer; the Slurm node view runs every five minutes. A
+        // fixed-size recent window fills with the first and loses the second,
+        // so a rule comparing what Slurm configures against what the hardware
+        // reports saw the Slurm side only in the moments right after it
+        // landed. Its diagnosis then appeared and disappeared in step with the
+        // eviction, which reaches an operator as a fault that keeps opening
+        // and immediately resolving.
+        let (store, entity) = store_with_entity("node-a").await;
+
+        let mut flood = vec![Observation::new(ProbeId::new("slurm.node"), entity, ProbeStatus::Ok)
+            .with_payload(serde_json::json!({"configured_gpu_count": 1}))];
+        for _ in 0..200 {
+            flood.push(Observation::new(ProbeId::new("network.tcp"), entity, ProbeStatus::Ok));
+        }
+        store.ingest_observations(&flood).await.expect("ingest");
+
+        let recent = store.recent_observations(entity, 32).await.expect("recent");
+        assert!(
+            !recent.iter().any(|o| o.probe_id.as_str() == "slurm.node"),
+            "the old window really did lose it, so this test is not vacuous"
+        );
+
+        let latest = store.latest_observations(entity).await.expect("latest");
+        let slurm = latest
+            .iter()
+            .find(|o| o.probe_id.as_str() == "slurm.node")
+            .expect("the slow probe survives");
+        assert_eq!(slurm.payload["configured_gpu_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn the_latest_is_kept_per_probe_and_per_observer() {
+        let (store, entity) = store_with_entity("node-a").await;
+        let mut observers = Vec::new();
+        for name in ["peer-a", "peer-b"] {
+            let peer = ManagedEntity::new("lab", EntityType::Host, name);
+            observers.push(peer.id);
+            store.save_entity(&peer).await.expect("peer");
+        }
+
+        let mut observations = Vec::new();
+        for observer in &observers {
+            for status in [ProbeStatus::Failed, ProbeStatus::Ok] {
+                observations
+                    .push(Observation::new(ProbeId::new("network.tcp"), entity, status).with_observer(*observer));
+            }
+        }
+        store.ingest_observations(&observations).await.expect("ingest");
+
+        let latest = store.latest_observations(entity).await.expect("latest");
+        assert_eq!(latest.len(), 2, "one per observer, not one overall: {latest:#?}");
+        assert!(
+            latest.iter().all(|o| o.status == ProbeStatus::Ok),
+            "and it is each observer's newest"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_entity_with_no_observations_yields_none() {
+        let (store, entity) = store_with_entity("node-a").await;
+        assert!(store.latest_observations(entity).await.expect("latest").is_empty());
     }
 
     #[tokio::test]

@@ -449,10 +449,14 @@ impl Agent {
 
     /// Build the registration this agent would send.
     pub fn registration(&self) -> RegisterRequest {
-        let gpus = self
-            .capabilities
-            .has(crate::capability::well_known::GPU_NVIDIA)
-            .then_some(0);
+        // The count this agent has actually observed, or nothing.
+        //
+        // It used to send `Some(0)` for any host with the GPU capability --
+        // that is, "this host has NVIDIA GPUs, and there are zero of them".
+        // The scheduler-comparison rule believed it, so every GPU node
+        // permanently disagreed with its own Gres line. `None` means "not
+        // stated", which the rule treats as nothing to compare.
+        let gpus = self.observed_gpu_count.map(|count| count as u32);
 
         RegisterRequest {
             protocol_version: PROTOCOL_VERSION,
@@ -741,6 +745,49 @@ mod tests {
             Spool::open_in_memory(SpoolLimits::default()).await.expect("spool"),
         );
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_gpu_host_that_has_not_counted_its_cards_yet_says_nothing_about_them() {
+        // It used to say "this host has NVIDIA GPUs, and there are zero of
+        // them". The scheduler-comparison rule believed it, so every GPU node
+        // permanently disagreed with its own Gres line, and an operator got
+        // "Slurm expects 1 GPU, the host reports 0" for hardware that was
+        // sitting there working. Nothing has been counted yet, so the right
+        // answer is to say nothing rather than to guess zero.
+        let mut agent = agent_with(FakeInspector::bare(), "127.0.0.1:1").await;
+        agent.capabilities.insert(crate::capability::well_known::GPU_NVIDIA);
+
+        let hardware = agent.registration().hardware;
+        assert!(
+            hardware["gpus"].is_null(),
+            "an uncounted GPU host must not claim zero: {hardware}"
+        );
+    }
+
+    #[tokio::test]
+    async fn once_the_probe_has_counted_the_cards_registration_reports_them() {
+        use crate::observation::{Observation, ProbeStatus};
+
+        let mut agent = agent_with(FakeInspector::bare(), "127.0.0.1:1").await;
+        agent.capabilities.insert(crate::capability::well_known::GPU_NVIDIA);
+        agent.observed_gpu_count = Some(4);
+
+        assert_eq!(agent.registration().hardware["gpus"], 4);
+
+        // And a later failed query does not erase it: a busy driver is not a
+        // node whose cards were removed.
+        let failed = Observation::new(
+            crate::probes::ProbeId::new(crate::probes::gpu::PROBE_ID),
+            agent.entity_id(),
+            ProbeStatus::Failed,
+        )
+        .with_payload(serde_json::json!({"expected_gpu_count": 4}));
+        assert!(
+            failed.payload.get("gpu_count").is_none(),
+            "the probe must not report a count it did not take"
+        );
+        assert_eq!(agent.registration().hardware["gpus"], 4);
     }
 
     #[tokio::test]

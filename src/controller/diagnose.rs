@@ -15,12 +15,6 @@ use crate::state::{Classification, EntityState};
 
 use super::Controller;
 
-/// How many recent observations to load per entity for diagnosis.
-///
-/// Only the latest per probe is used, so this only needs to be large enough to
-/// cover every probe that ran recently against one entity.
-const OBSERVATIONS_PER_ENTITY: u32 = 32;
-
 impl Controller {
     /// Run every diagnosis rule against the current picture.
     pub async fn diagnose(&self) -> Result<Vec<Diagnosis>, StoreError> {
@@ -43,11 +37,7 @@ impl Controller {
 
         let mut observations = ObservationIndex::new();
         for entity in inventory.entities() {
-            for observation in self
-                .store()
-                .recent_observations(entity.id, OBSERVATIONS_PER_ENTITY)
-                .await?
-            {
+            for observation in self.store().latest_observations(entity.id).await? {
                 observations.insert(observation);
             }
         }

@@ -201,9 +201,13 @@ impl Probe for NvidiaGpuProbe {
                     Some(count) if count > 0 => ProbeStatus::Failed,
                     _ => ProbeStatus::Unsupported,
                 };
+                // No `gpu_count` here, deliberately. A query that failed did
+                // not count zero GPUs, it counted nothing, and writing 0 turns
+                // "we could not look" into "the cards are gone" -- which reads
+                // downstream as a node whose GPUs vanished and came back every
+                // time nvidia-smi was briefly busy.
                 return Observation::new(PROBE_ID.into(), context.target_entity, status)
                     .with_payload(serde_json::json!({
-                        "gpu_count": 0,
                         "expected_gpu_count": expected,
                     }))
                     .with_error("nvidia_smi_unavailable", detail);
@@ -355,7 +359,31 @@ mod tests {
 
         assert_eq!(observation.status, ProbeStatus::Failed);
         assert_eq!(observation.payload["expected_gpu_count"], 4);
-        assert_eq!(observation.payload["gpu_count"], 0);
+        assert!(
+            observation.payload.get("gpu_count").is_none_or(|v| v.is_null()),
+            "a failed query counted nothing, not zero: {}",
+            observation.payload
+        );
+        assert_eq!(observation.error_code.as_deref(), Some("nvidia_smi_unavailable"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_query_does_not_report_the_cards_as_gone() {
+        // Reported from a live cluster: GPU count notifications arriving and
+        // resolving repeatedly on nodes whose GPUs had not moved. A busy or
+        // briefly wedged nvidia-smi made the probe say zero, the
+        // scheduler-comparison rule believed it, and the node appeared to lose
+        // and regain its cards. Absence of evidence is not evidence of
+        // absence, and here the difference is a pager.
+        let observation = NvidiaGpuProbe::new()
+            .collect(&context(serde_json::json!({"expected_gpu_count": 1})))
+            .await;
+
+        assert!(
+            observation.payload.get("gpu_count").is_none_or(|v| v.is_null()),
+            "{}",
+            observation.payload
+        );
     }
 
     #[tokio::test]
