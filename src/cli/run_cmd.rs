@@ -559,12 +559,24 @@ pub async fn entity(cli: &Cli, command: &EntityCommand) -> anyhow::Result<i32> {
         EntityCommand::Show { name, json } => {
             // Accept either the canonical name or the entity id, so an id
             // copied out of a diagnosis can be pasted straight back in.
-            let Some(entity) = report.entities.iter().find(|e| &e.name == name || &e.id == name) else {
-                eprintln!(
-                    "error: no entity named {name:?} in environment {:?}",
-                    config.environment
-                );
-                return Ok(1);
+            let found: Vec<&status_cmd::EntityStatus> = report
+                .entities
+                .iter()
+                .filter(|e| entity_matches(&e.entity_type, &e.name, &e.id, name))
+                .collect();
+            let entity = match found.as_slice() {
+                [one] => *one,
+                [] => {
+                    eprintln!(
+                        "error: no entity named {name:?} in environment {:?}",
+                        config.environment
+                    );
+                    return Ok(1);
+                }
+                many => {
+                    let names: Vec<String> = many.iter().map(|e| format!("{}/{}", e.entity_type, e.name)).collect();
+                    return Ok(ambiguous(name, &names));
+                }
             };
             if *json {
                 println!("{}", serde_json::to_string_pretty(entity)?);
@@ -580,15 +592,26 @@ pub async fn entity(cli: &Cli, command: &EntityCommand) -> anyhow::Result<i32> {
             json,
         } => {
             let inventory = store.load_inventory(&config.environment).await?;
-            let Some(target) = inventory
+            let found: Vec<_> = inventory
                 .entities()
-                .find(|e| &e.canonical_name == name || e.id.to_string() == *name)
-            else {
-                eprintln!(
-                    "error: no entity named {name:?} in environment {:?}",
-                    config.environment
-                );
-                return Ok(1);
+                .filter(|e| entity_matches(e.entity_type.as_str(), &e.canonical_name, &e.id.to_string(), name))
+                .collect();
+            let target = match found.as_slice() {
+                [one] => *one,
+                [] => {
+                    eprintln!(
+                        "error: no entity named {name:?} in environment {:?}",
+                        config.environment
+                    );
+                    return Ok(1);
+                }
+                many => {
+                    let names: Vec<String> = many
+                        .iter()
+                        .map(|e| format!("{}/{}", e.entity_type.as_str(), e.canonical_name))
+                        .collect();
+                    return Ok(ambiguous(name, &names));
+                }
             };
 
             // Filtered in the query when a probe is named. Loading the last
@@ -622,6 +645,43 @@ pub async fn entity(cli: &Cli, command: &EntityCommand) -> anyhow::Result<i32> {
             Ok(0)
         }
     }
+}
+
+/// Whether an entity answers to what the operator typed.
+///
+/// Accepts an id, a `type/name` pair as used everywhere else (`host/node01`),
+/// or a bare name.
+///
+/// The `type/name` form stopped being a convenience the moment storage domains
+/// started being derived: a domain takes the canonical name of the host that
+/// serves it, so `david02` now names two entities, and each command silently
+/// picked whichever its own ordering put first. `entity show david02` answered
+/// about the storage domain while `entity observations david02` answered about
+/// the host, which is worse than either answer alone.
+fn entity_matches(entity_type: &str, name: &str, id: &str, query: &str) -> bool {
+    if id == query {
+        return true;
+    }
+    match query.split_once('/') {
+        Some((wanted_type, wanted_name)) => wanted_type == entity_type && wanted_name == name,
+        None => name == query,
+    }
+}
+
+/// Report a reference that names more than one entity.
+fn ambiguous(query: &str, candidates: &[String]) -> i32 {
+    eprintln!(
+        "error: {query:?} names {} entities in this environment:\n",
+        candidates.len()
+    );
+    for candidate in candidates {
+        eprintln!("  {candidate}");
+    }
+    eprintln!(
+        "\nName one of them, for example: sentinel entity show {}",
+        candidates[0]
+    );
+    1
 }
 
 /// Render observations for a human, resolving observers to names.
@@ -1013,6 +1073,72 @@ mod tests {
         let shown = report.entities.iter().find(|e| e.name == "node-a").expect("node-a");
         assert!(shown.hardware.is_none());
         assert!(!status_cmd::render_entity(shown).contains("Reported hardware"));
+    }
+
+    #[test]
+    fn a_reference_can_name_a_type_an_id_or_a_bare_name() {
+        assert!(entity_matches("host", "david02", "id-1", "david02"));
+        assert!(entity_matches("host", "david02", "id-1", "host/david02"));
+        assert!(entity_matches("host", "david02", "id-1", "id-1"));
+        assert!(!entity_matches("host", "david02", "id-1", "storage/david02"));
+        assert!(!entity_matches("host", "david02", "id-1", "david01"));
+    }
+
+    #[tokio::test]
+    async fn a_name_shared_by_two_entities_is_refused_rather_than_guessed() {
+        // A derived storage domain takes the canonical name of the host that
+        // serves it, so a bare name stopped being unique. Each command picked
+        // whichever its own ordering put first, which meant `entity show
+        // david02` answered about the storage domain while `entity
+        // observations david02` answered about the host.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli = cli_for(&write_config(
+            dir.path(),
+            "\n[[entities]]\ntype = \"host\"\nname = \"fs1\"\n\n[[entities]]\ntype = \"storage\"\nname = \"fs1\"\n",
+        ));
+        discover(&cli, false).await.expect("discover");
+
+        let ambiguous = EntityCommand::Show {
+            name: "fs1".into(),
+            json: false,
+        };
+        assert_eq!(entity(&cli, &ambiguous).await.expect("show"), 1);
+
+        // Qualified, both are reachable and they are different entities.
+        for reference in ["host/fs1", "storage/fs1"] {
+            let command = EntityCommand::Show {
+                name: reference.into(),
+                json: false,
+            };
+            assert_eq!(entity(&cli, &command).await.expect("show"), 0, "{reference}");
+        }
+    }
+
+    #[tokio::test]
+    async fn observations_resolve_a_reference_the_same_way_show_does() {
+        // The two disagreeing is what made the bug hard to see.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli = cli_for(&write_config(
+            dir.path(),
+            "\n[[entities]]\ntype = \"host\"\nname = \"fs1\"\n\n[[entities]]\ntype = \"storage\"\nname = \"fs1\"\n",
+        ));
+        discover(&cli, false).await.expect("discover");
+
+        let command = EntityCommand::Observations {
+            name: "fs1".into(),
+            probe: None,
+            limit: 40,
+            json: false,
+        };
+        assert_eq!(entity(&cli, &command).await.expect("observations"), 1);
+
+        let qualified = EntityCommand::Observations {
+            name: "storage/fs1".into(),
+            probe: None,
+            limit: 40,
+            json: false,
+        };
+        assert_eq!(entity(&cli, &qualified).await.expect("observations"), 0);
     }
 
     #[tokio::test]

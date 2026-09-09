@@ -20,6 +20,52 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.20
+
+`nfs.server.exports` の観測が 1 件も無い、という調査から 3 件。
+いずれも実機（ZFS の `sharenfs` で export している fileserver）で発覚。
+
+* **`nfs.server.exports` は、誰の環境でも一度も走っていなかった。**
+  probe は定義され、capability で gate され、catalog に載り、
+  診断ルールからも参照されていた。**実行経路だけが無かった。**
+  `ExecutionMode::Local` なので走れるのは agent 上だけだが、
+  agent の `schedule_storage_probes` は client 側の 2 本しか登録しておらず、
+  **走る場所が存在しなかった。**
+  * その結果、`NFS_SERVICE_FAILURE` の
+    「ポートは応答するが何も export されていない」という分岐は
+    **本番で到達不能**だった。storage の健全性も
+    「2049 に何か応答する」だけで決まっていた。
+  * client 側の early return（マウントが無ければ return）より**前**に登録する。
+    マウントを 1 つも持たない純粋な fileserver は、
+    まさにそこで弾かれるホストなので。
+
+* **`/etc/exports` しか読んでいなかった。**
+  ZFS の `sharenfs` は `/etc/exports.d/zfs.exports` に書き、
+  隣の `/etc/exports` はパッケージ同梱のコメントだけのファイルになる。
+  **プール全体を export している健全な fileserver が
+  「何も export していない」と報告される。** 上の修正だけを入れていたら、
+  全 fileserver に critical が出ていた。
+  * `exportfs` が読むもの（exports(5)）と同じく、
+    `/etc/exports` と `/etc/exports.d/*.exports` の両方を読む。
+    ZFS 固有の対処ではない。
+  * **読めないソースは「export が無い」ではない。**
+    権限で読めないファイルがあるときは結論を出さない（Unsupported）。
+    実機の `/etc/exports.d/` には root のみ読み取り可の
+    `zfs.exports.lock` が同居していた。
+    拡張子 `.exports` のみを読むので実害は無かったが、判定は明示した。
+  * catalog の記述も訂正。この probe は `exportfs -v` を実行しない。
+    ファイルを読むだけ。
+
+* **entity の参照が曖昧だった。**
+  導出された storage domain は提供元ホストの名前をそのまま名乗るため、
+  `david02` が 2 つの entity を指すようになっていた。
+  各コマンドが自分の並び順で先頭を黙って選んでおり、
+  **`entity show david02` は storage を、
+  `entity observations david02` は host を返していた。**
+  * `host/david02` のような `type/name` を受け付ける
+    （依存関係や設定ファイルと同じ書式）。
+  * 曖昧なときは黙って選ばず、候補を挙げて拒否する。
+
 ## v0.3.19
 
 storage の健全性が UNKNOWN のままだという報告を追った結果、3 件。

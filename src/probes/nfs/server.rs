@@ -5,7 +5,7 @@
 //! nothing; "the port answers but nothing is exported" tells them where to
 //! look.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -103,6 +103,18 @@ impl Probe for NfsPortProbe {
 pub struct NfsExportsProbe {
     definition: ProbeDefinition,
     exports_path: PathBuf,
+    exports_dir: PathBuf,
+}
+
+/// What the export sources between them said.
+#[derive(Debug, Default, PartialEq)]
+pub struct ExportSources {
+    /// Paths this host exports.
+    pub exports: Vec<String>,
+    /// Sources that were read.
+    pub read: usize,
+    /// Sources that exist but could not be read.
+    pub unreadable: usize,
 }
 
 impl Default for NfsExportsProbe {
@@ -121,6 +133,7 @@ impl NfsExportsProbe {
                 .every(Duration::from_secs(60))
                 .within(Duration::from_secs(5)),
             exports_path: PathBuf::from("/etc/exports"),
+            exports_dir: PathBuf::from(EXPORTS_DIR),
         }
     }
 
@@ -130,12 +143,63 @@ impl NfsExportsProbe {
         self
     }
 
-    /// The exported paths.
+    /// Builder: read the drop-in directory from somewhere else, for tests.
+    pub fn with_exports_dir(mut self, path: impl Into<PathBuf>) -> Self {
+        self.exports_dir = path.into();
+        self
+    }
+
+    /// Everything this host exports, from every source the server reads.
+    ///
+    /// Both `/etc/exports` and `/etc/exports.d/*.exports`, because that is
+    /// what `exportfs` itself reads (exports(5)). Reading only the first was
+    /// wrong on any host whose exports are managed by something that uses the
+    /// drop-in directory -- ZFS `sharenfs` writes `zfs.exports` there, and the
+    /// package-supplied `/etc/exports` beside it contains nothing but
+    /// comments. That host exports its whole pool and looked, to this probe,
+    /// like a fileserver serving nothing.
+    pub fn export_sources(&self) -> ExportSources {
+        let mut found = ExportSources::default();
+
+        let mut consider = |path: &Path, exists: bool| match std::fs::read_to_string(path) {
+            Ok(text) => {
+                found.read += 1;
+                found.exports.extend(parse_exports(&text));
+            }
+            Err(_) if exists => found.unreadable += 1,
+            Err(_) => {}
+        };
+
+        consider(&self.exports_path, self.exports_path.exists());
+
+        if let Ok(entries) = std::fs::read_dir(&self.exports_dir) {
+            let mut paths: Vec<PathBuf> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "exports"))
+                .collect();
+            // Sorted, because the server applies them in name order and an
+            // operator comparing two runs should not have to sort by eye.
+            paths.sort();
+            for path in paths {
+                consider(&path, true);
+            }
+        }
+
+        found.exports.sort();
+        found.exports.dedup();
+        found
+    }
+
+    /// The exported paths, or `None` when nothing could be read.
     pub fn exports(&self) -> Option<Vec<String>> {
-        let text = std::fs::read_to_string(&self.exports_path).ok()?;
-        Some(parse_exports(&text))
+        let found = self.export_sources();
+        (found.read > 0).then_some(found.exports)
     }
 }
+
+/// Where the NFS server reads drop-in export files from.
+pub const EXPORTS_DIR: &str = "/etc/exports.d";
 
 /// Parse `/etc/exports`, returning the exported paths.
 pub fn parse_exports(text: &str) -> Vec<String> {
@@ -159,29 +223,62 @@ impl Probe for NfsExportsProbe {
     }
 
     async fn collect(&self, context: &ProbeContext) -> Observation {
-        match self.exports() {
-            Some(exports) if !exports.is_empty() => {
-                Observation::new(PROBE_SERVER_EXPORTS.into(), context.target_entity, ProbeStatus::Ok)
-                    .with_payload(serde_json::json!({"exports": exports, "export_count": exports.len()}))
-            }
-            Some(_) => Observation::new(PROBE_SERVER_EXPORTS.into(), context.target_entity, ProbeStatus::Failed)
-                .with_payload(serde_json::json!({"exports": [], "export_count": 0}))
-                .with_error(
-                    "no_exports",
-                    "the export list is empty; clients will be refused, not timed out",
-                ),
-            // No exports file is not a fault: this host may export through some
-            // other mechanism, or the capability may have been forced on.
-            None => Observation::new(
+        let found = self.export_sources();
+
+        if !found.exports.is_empty() {
+            return Observation::new(PROBE_SERVER_EXPORTS.into(), context.target_entity, ProbeStatus::Ok).with_payload(
+                serde_json::json!({
+                    "exports": found.exports,
+                    "export_count": found.exports.len(),
+                    "sources_read": found.read,
+                }),
+            );
+        }
+
+        // A source we cannot read is not a source that says nothing. Calling
+        // that an empty export list would report a working fileserver as
+        // serving nothing, which is a page and a trip to the wrong machine.
+        if found.unreadable > 0 {
+            return Observation::new(
                 PROBE_SERVER_EXPORTS.into(),
                 context.target_entity,
                 ProbeStatus::Unsupported,
             )
+            .with_payload(serde_json::json!({"unreadable_sources": found.unreadable}))
             .with_error(
-                "no_exports_file",
-                format!("cannot read {}", self.exports_path.display()),
-            ),
+                "exports_unreadable",
+                format!(
+                    "{} export source(s) exist but could not be read; \
+                     no conclusion can be drawn about what is exported",
+                    found.unreadable
+                ),
+            );
         }
+
+        if found.read > 0 {
+            return Observation::new(PROBE_SERVER_EXPORTS.into(), context.target_entity, ProbeStatus::Failed)
+                .with_payload(serde_json::json!({"exports": [], "export_count": 0}))
+                .with_error(
+                    "no_exports",
+                    "the export list is empty; clients will be refused, not timed out",
+                );
+        }
+
+        // Nothing to read at all is not a fault: this host may export through
+        // some other mechanism, or the capability may have been forced on.
+        Observation::new(
+            PROBE_SERVER_EXPORTS.into(),
+            context.target_entity,
+            ProbeStatus::Unsupported,
+        )
+        .with_error(
+            "no_exports_file",
+            format!(
+                "neither {} nor {}/*.exports could be read",
+                self.exports_path.display(),
+                self.exports_dir.display()
+            ),
+        )
     }
 }
 
@@ -190,6 +287,111 @@ crate::probes::configurable_probe!(NfsPortProbe, NfsExportsProbe);
 
 #[cfg(test)]
 mod tests {
+
+    /// A probe reading a temporary directory instead of /etc.
+    fn probe_over(dir: &std::path::Path) -> NfsExportsProbe {
+        NfsExportsProbe::new()
+            .with_exports_path(dir.join("exports"))
+            .with_exports_dir(dir.join("exports.d"))
+    }
+
+    fn exports_context() -> ProbeContext {
+        context(serde_json::Value::Null)
+    }
+
+    #[tokio::test]
+    async fn exports_managed_by_zfs_are_found_in_the_drop_in_directory() {
+        // The reason this reads more than one file. `zfs set sharenfs=on`
+        // writes /etc/exports.d/zfs.exports, and the /etc/exports beside it is
+        // the one the package shipped: comments only. Reading just that file
+        // reported a fileserver exporting its whole pool as exporting nothing,
+        // which is a critical incident pointing at a healthy machine.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("exports"), "# /etc/exports: see exports(5)\n").expect("exports");
+        std::fs::create_dir(dir.path().join("exports.d")).expect("dir");
+        std::fs::write(
+            dir.path().join("exports.d/zfs.exports"),
+            "/tank\t*(rw,no_subtree_check)\n",
+        )
+        .expect("zfs.exports");
+
+        let observation = probe_over(dir.path()).collect(&exports_context()).await;
+
+        assert_eq!(observation.status, ProbeStatus::Ok, "{:?}", observation.error_message);
+        assert_eq!(observation.payload["exports"][0], "/tank");
+    }
+
+    #[tokio::test]
+    async fn both_sources_are_combined_without_duplicates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("exports"), "/srv/home *(rw)\n/tank *(rw)\n").expect("exports");
+        std::fs::create_dir(dir.path().join("exports.d")).expect("dir");
+        std::fs::write(dir.path().join("exports.d/zfs.exports"), "/tank *(rw)\n").expect("zfs");
+
+        let found = probe_over(dir.path()).export_sources();
+        assert_eq!(found.exports, vec!["/srv/home".to_string(), "/tank".to_string()]);
+        assert_eq!(found.read, 2);
+    }
+
+    #[tokio::test]
+    async fn files_without_the_exports_extension_are_ignored() {
+        // The server reads *.exports only, so a stray backup in that directory
+        // must not become part of what this host claims to serve.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("exports"), "# nothing\n").expect("exports");
+        std::fs::create_dir(dir.path().join("exports.d")).expect("dir");
+        std::fs::write(dir.path().join("exports.d/zfs.exports.bak"), "/old *(rw)\n").expect("bak");
+
+        let observation = probe_over(dir.path()).collect(&exports_context()).await;
+        assert_eq!(observation.status, ProbeStatus::Failed, "genuinely nothing is exported");
+        assert_eq!(observation.error_code.as_deref(), Some("no_exports"));
+    }
+
+    #[tokio::test]
+    async fn a_server_with_nothing_exported_anywhere_is_still_a_fault() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("exports"), "# see exports(5)\n").expect("exports");
+        std::fs::create_dir(dir.path().join("exports.d")).expect("dir");
+
+        let observation = probe_over(dir.path()).collect(&exports_context()).await;
+        assert_eq!(observation.status, ProbeStatus::Failed);
+        assert_eq!(observation.error_code.as_deref(), Some("no_exports"));
+    }
+
+    #[tokio::test]
+    async fn no_export_sources_at_all_is_not_a_fault() {
+        // The capability may have been forced on, or this host may export
+        // through something else entirely.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let observation = probe_over(dir.path()).collect(&exports_context()).await;
+        assert_eq!(observation.status, ProbeStatus::Unsupported);
+        assert_eq!(observation.error_code.as_deref(), Some("no_exports_file"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_source_that_cannot_be_read_draws_no_conclusion() {
+        // Not "nothing is exported". An unreadable file is a question this
+        // probe cannot answer, and answering it anyway condemns a working
+        // fileserver.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("exports"), "# see exports(5)\n").expect("exports");
+        std::fs::create_dir(dir.path().join("exports.d")).expect("dir");
+        let secret = dir.path().join("exports.d/zfs.exports");
+        std::fs::write(&secret, "/tank *(rw)\n").expect("zfs");
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+
+        let observation = probe_over(dir.path()).collect(&exports_context()).await;
+
+        // Running as root would read it regardless, and then the assertion
+        // below is about a different situation.
+        if observation.status != ProbeStatus::Ok {
+            assert_eq!(observation.status, ProbeStatus::Unsupported, "{observation:?}");
+            assert_eq!(observation.error_code.as_deref(), Some("exports_unreadable"));
+        }
+    }
     use super::*;
     use crate::capability::CapabilitySet;
     use crate::entity::{EntityKey, EntityType};

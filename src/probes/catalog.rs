@@ -117,7 +117,7 @@ pub fn catalog() -> Vec<CatalogEntry> {
         entry(
             Arc::new(nfs::NfsExportsProbe::new()),
             "NFS server の export 一覧",
-            "exportfs -v",
+            "reads /etc/exports and /etc/exports.d/*.exports, as exportfs does; runs no command",
             None,
         ),
     ]

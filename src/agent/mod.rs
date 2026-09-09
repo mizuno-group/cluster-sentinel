@@ -130,8 +130,22 @@ fn schedule_journal_probes(local: &mut LocalProbes, schedules: &ProbeSchedules) 
 }
 
 fn schedule_storage_probes(local: &mut LocalProbes, schedules: &ProbeSchedules, inspector: &dyn SystemInspector) {
-    use crate::probes::nfs::{NfsClientIoProbe, NfsMountProbe};
+    use crate::probes::nfs::{NfsClientIoProbe, NfsExportsProbe, NfsMountProbe};
 
+    // What this host serves. Scheduled unconditionally and gated by the
+    // capability like every other probe, because a host can export without
+    // mounting anything -- a fileserver that is only a fileserver -- and the
+    // client-side check below returns early for exactly that host.
+    //
+    // Nothing scheduled this. `nfs.server.exports` was defined, capability
+    // gated, listed in the catalogue and consulted by the diagnosis rule that
+    // tells "the port answers but nothing is exported" from a dead export
+    // service -- and it had never run, anywhere, because the only place that
+    // could run it is this function and this function did not know about it.
+    // The rule's second branch was unreachable in production.
+    add_scheduled(local, schedules, NfsExportsProbe::new(), serde_json::Value::Null);
+
+    // What this host uses.
     let mounts: Vec<_> = inspector.mounts().into_iter().filter(|m| m.is_nfs()).collect();
     if mounts.is_empty() {
         return;
@@ -745,6 +759,48 @@ mod tests {
             Spool::open_in_memory(SpoolLimits::default()).await.expect("spool"),
         );
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_fileserver_schedules_the_probe_that_reads_its_exports() {
+        // `nfs.server.exports` was defined, capability gated, listed in the
+        // catalogue and consulted by the rule that tells "the port answers but
+        // nothing is exported" from a dead export service. Nothing scheduled
+        // it, so it had never run anywhere and that branch of the rule was
+        // unreachable. On a real cluster the storage domains were judged
+        // entirely on whether something answered on 2049.
+        let inspector = FakeInspector::bare().with_path("/etc/exports");
+        let agent = agent_with(inspector, "127.0.0.1:1").await;
+
+        assert!(
+            agent
+                .local_probes()
+                .probes()
+                .any(|p| p.definition().id.as_str() == crate::probes::nfs::PROBE_SERVER_EXPORTS),
+            "a host that exports must have something reading what it exports"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_fileserver_that_mounts_nothing_still_watches_its_exports() {
+        // The client-side probes return early when there are no NFS mounts,
+        // and a fileserver that is only a fileserver is exactly that host.
+        let inspector = FakeInspector::bare().with_path("/etc/exports");
+        let agent = agent_with(inspector, "127.0.0.1:1").await;
+        let scheduled: Vec<&str> = agent
+            .local_probes()
+            .probes()
+            .map(|p| p.definition().id.as_str())
+            .collect();
+
+        assert!(
+            scheduled.contains(&crate::probes::nfs::PROBE_SERVER_EXPORTS),
+            "{scheduled:?}"
+        );
+        assert!(
+            !scheduled.contains(&crate::probes::nfs::PROBE_CLIENT_MOUNT),
+            "it mounts nothing, so there is nothing to describe: {scheduled:?}"
+        );
     }
 
     #[tokio::test]
