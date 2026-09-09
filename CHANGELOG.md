@@ -20,6 +20,21 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.10
+
+* **Slack への通知が 400 で弾かれていた**（バグ修正）。
+  Slack の incoming webhook は `text`（または `blocks` / `attachments`）を
+  要求し、無ければ `missing_text_or_fallback_or_attachments` を返す。
+  汎用 JSON をそのまま送っていたため、**Slack 宛の通知は 1 件も届かなかった。**
+  * payload に `text`（Slack / Microsoft Teams）と
+    `content`（Discord）を追加した。中身は title・body・推奨アクションを
+    まとめた読める文章。
+  * 構造化されたフィールドはそのまま残っているので、
+    severity で振り分ける受け手は影響を受けない。
+  * 各サービス専用の provider を書けば色やスレッドも使えるが、
+    **前段に変換を挟まないと動かない webhook は、多くの人にとって
+    動かない webhook**なので、URL だけで動くことを優先した。
+
 ## v0.3.9
 
 * **incident が開いても通知されないことがあった**（バグ修正）。

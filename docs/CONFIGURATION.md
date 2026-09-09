@@ -215,6 +215,35 @@ blocking syscall が積み上がらないようにするためであり
 override は controller の remote probe と agent の peer probe にも同じく適用されます。
 観測者ごとに頻度が違うと、quorum が異なる頻度の観測を比較することになるためです。
 
+#### 送信される内容
+
+`Content-Type: application/json` の POST です。
+
+```json
+{
+  "source": "cluster-sentinel",
+  "incident_id": "...",
+  "fingerprint": "...",
+  "trigger": "opened",
+  "severity": "critical",
+  "resolved": false,
+  "title": "...",
+  "body": "...",
+  "recommended_actions": ["..."],
+  "timestamp": "...",
+  "text": "...",
+  "content": "..."
+}
+```
+
+`text` と `content` には、全体を読める文章にしたものが入ります。
+**Slack / Microsoft Teams は `text` を、Discord は `content` を要求する**ため、
+URL を書くだけで動きます（無いと Slack は
+`missing_text_or_fallback_or_attachments` で 400 を返します）。
+
+構造化されたフィールドはそのまま残っているので、
+severity で振り分けるような受け手はそちらを使ってください。
+
 ### `[retention]`
 
 記録したデータをどれだけ保持するかです。

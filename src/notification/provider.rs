@@ -92,11 +92,41 @@ impl WebhookProvider {
         &self.url
     }
 
+    /// The whole notification as one block of readable text.
+    ///
+    /// Carried alongside the structured fields because the destinations people
+    /// actually use want a message, not a schema: Slack refuses a payload with
+    /// no `text` outright (`missing_text_or_fallback_or_attachments`), and
+    /// Discord and Teams want the same thing under their own names. A receiver
+    /// that parses the structured fields simply ignores these.
+    fn message(notification: &Notification) -> String {
+        let mut text = format!("{}\n\n{}", notification.title, notification.body);
+        if !notification.recommended_actions.is_empty() {
+            // The body may or may not end in a newline depending on what built
+            // it, and a heading glued to the end of a sentence reads as a typo.
+            if !text.ends_with("\n\n") {
+                text.push_str(if text.ends_with('\n') { "\n" } else { "\n\n" });
+            }
+            text.push_str("Recommended actions:\n");
+            for action in &notification.recommended_actions {
+                text.push_str(&format!("  - {action}\n"));
+            }
+        }
+        text
+    }
+
     /// The JSON body sent for a notification.
     ///
     /// Deliberately flat and self-describing: a receiver should not need to
     /// know Sentinel's internals to route on severity or recognise a recovery.
+    ///
+    /// It also carries the message under the field names Slack, Discord and
+    /// Teams each insist on, so those work with a URL and nothing else. A
+    /// dedicated provider per service would render better -- colour, threads,
+    /// buttons -- but a webhook that needs a translator in front of it is a
+    /// webhook most people will not get working at all.
     pub fn payload(notification: &Notification) -> serde_json::Value {
+        let message = Self::message(notification);
         serde_json::json!({
             "source": "cluster-sentinel",
             "incident_id": notification.incident_id,
@@ -108,6 +138,10 @@ impl WebhookProvider {
             "body": notification.body,
             "recommended_actions": notification.recommended_actions,
             "timestamp": notification.created_at,
+            // Slack and Microsoft Teams.
+            "text": message,
+            // Discord.
+            "content": message,
         })
     }
 }
@@ -158,6 +192,42 @@ mod tests {
                 .recommending(vec!["systemctl status nfs-server".into()]),
         );
         Notification::for_incident(&incident, trigger)
+    }
+
+    #[test]
+    fn the_payload_carries_a_message_slack_will_accept() {
+        // Slack refuses a payload with no `text`:
+        // `missing_text_or_fallback_or_attachments`. Reported from a real
+        // cluster, where the only destination configured was a Slack webhook
+        // and every notification bounced with a 400.
+        let payload = WebhookProvider::payload(&notification(Trigger::Opened));
+
+        let text = payload["text"].as_str().expect("text");
+        assert!(!text.is_empty());
+        assert!(text.contains(&notification(Trigger::Opened).title));
+
+        // Discord wants the same thing under another name.
+        assert_eq!(payload["content"], payload["text"]);
+    }
+
+    #[test]
+    fn the_message_includes_what_to_do_about_it() {
+        let payload = WebhookProvider::payload(&notification(Trigger::Opened));
+        let text = payload["text"].as_str().expect("text");
+        for action in &notification(Trigger::Opened).recommended_actions {
+            assert!(text.contains(action), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_structured_fields_are_still_there() {
+        // The message is carried alongside them, not instead of them: a
+        // receiver that routes on severity must keep working.
+        let payload = WebhookProvider::payload(&notification(Trigger::Resolved));
+        assert_eq!(payload["source"], "cluster-sentinel");
+        assert_eq!(payload["resolved"], true);
+        assert!(payload["severity"].is_string());
+        assert!(payload["fingerprint"].is_string());
     }
 
     #[test]

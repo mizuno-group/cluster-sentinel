@@ -1,6 +1,6 @@
 [package]
 name = "sentinel"
-version = "0.3.9"
+version = "0.3.10"
 edition = "2021"
 rust-version = "1.82"
 description = "Cluster Sentinel - generic cluster infrastructure monitoring, failure detection and incident diagnosis"
