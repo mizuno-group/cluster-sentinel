@@ -17,6 +17,24 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.8 での追加
+
+**`sentinel notify test`** — 設定した通知先に届くかを、障害を待たずに確認できます。
+
+```bash
+sudo -u sentinel sentinel notify test
+```
+
+```
+ops                  sent
+broken               FAILED: cannot reach http://... : error sending request
+
+1 of 2 destination(s) failed.
+```
+
+incident も database も重複排除も触りません。「この controller が叫ぶべき相手に
+届くか」だけを答えます。URL の打ち間違いを障害の最中に知るのが最悪なので。
+
 ## v0.3.7 での修正
 
 **service entity を誰も観測していませんでした。**

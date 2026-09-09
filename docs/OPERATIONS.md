@@ -182,6 +182,52 @@ url = "https://ntfy.example.org/cluster-sentinel"
 Slack を止めても pager は止まりません。
 controller と fallback notifier が同じ incident を検知しても、通知は 1 回です。
 
+### 実機で通知経路を確かめる
+
+宛先を設定したあと、**障害を待たずに**届くかどうかを確認できます。
+
+```bash
+sudo -u sentinel sentinel notify test
+sudo -u sentinel sentinel notify test --provider ops        # 宛先を絞る
+sudo -u sentinel sentinel notify test --severity critical   # 重大度を変えて経路を試す
+```
+
+```
+ops                  sent
+broken               FAILED: cannot reach http://... : error sending request
+
+1 of 2 destination(s) failed.
+```
+
+**incident も database も重複排除も触りません。** 「この controller が、
+叫ぶべき相手に届くか」だけを答えます。URL の打ち間違いを障害の最中に
+知ることになるのが最悪なので、その前に答えられる必要があります。
+
+送られる内容は、人が見てもフィルタが見ても**テストと分かる**ようにしてあります。
+`fingerprint` は `sentinel-test-notification` 固定で、実際の incident と
+衝突しません（衝突すれば本物の通知を黙らせてしまいます）。
+
+`min_severity` の下でも送ります。floor は「起こす価値があるか」を決めるもので、
+テストはそれには当たらないためです。確かめているのは**到達できるか**だけです。
+
+> 宛先が受け取ったことと、人が気づくことは別です。
+> 実際にメッセージが届いているかは受信側で確認してください。
+
+### 全経路を確かめる
+
+通知経路だけでなく、probe → 診断 → incident → 通知の全体を試すなら、
+**最も影響の小さい実障害**を起こします。
+
+```bash
+ssh <node> sudo systemctl stop sentinel-agent
+# 数十秒待つ -> SENTINEL_AGENT_FAILURE として通知されるはず
+ssh <node> sudo systemctl start sentinel-agent
+# 復旧通知（resolved: true）が届くはず
+```
+
+agent を止めてもジョブには影響しません。その間そのノードのローカル観測が
+止まるだけです。**本番で試せる障害はこれが上限**だと考えてください。
+
 ## Maintenance window
 
 計画作業中の通知を抑止します。

@@ -7,6 +7,7 @@ mod config_cmd;
 mod daemon_cmd;
 pub mod generate;
 mod install_cmd;
+mod notify_cmd;
 mod run_cmd;
 mod status_cmd;
 mod version_cmd;
@@ -150,11 +151,35 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Notification destinations.
+    Notify {
+        #[command(subcommand)]
+        command: NotifyCommand,
+    },
     /// Report what this host looks like to Sentinel, and why.
     Doctor {
         /// Emit JSON instead of text.
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// `sentinel notify ...`.
+#[derive(Debug, Subcommand)]
+pub enum NotifyCommand {
+    /// Send one test notification to each configured destination.
+    ///
+    /// Touches nothing else: no incident, no database, no deduplication. It
+    /// answers whether this controller can reach the places it is supposed to
+    /// shout at, which is a question that has to be answerable before an
+    /// outage rather than during one.
+    Test {
+        /// Only this destination, by name.
+        #[arg(long)]
+        provider: Option<String>,
+        /// Severity to send as. Defaults to `warning`.
+        #[arg(long)]
+        severity: Option<String>,
     },
 }
 
@@ -301,6 +326,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<i32> {
             observations,
             json,
         } => run_cmd::prune(&cli, *dry_run, *vacuum, observations.as_deref(), *json).await,
+        Command::Notify { command } => match command {
+            NotifyCommand::Test { provider, severity } => {
+                notify_cmd::test(&cli, provider.as_deref(), severity.as_deref()).await
+            }
+        },
         Command::Doctor { json } => daemon_cmd::doctor(&cli, *json).await,
     }
 }
