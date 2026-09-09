@@ -20,6 +20,20 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.9
+
+* **incident が開いても通知されないことがあった**（バグ修正）。
+  correlation が discovery ループと診断ループの**両方**で走っており、
+  通知を送るのは後者だけだった。先に走ったほうが「開いた」という事実を
+  消費するため、**discovery cycle で開かれた incident は記録されるだけで
+  一度も通知されない。**
+  * 非決定的に起きる通知漏れであり、**動いているように見えるぶん
+    通知が無いより悪い。**
+  * incident を開く場所を 1 箇所（診断ループ）に統一した。
+    discovery は inventory・observation・state までを担い、
+    診断結果は報告するが incident は作らない。
+  * `DiscoveryReport` から `incidents_opened` / `incidents_resolved` を削除。
+
 ## v0.3.8
 
 * **`sentinel notify test`**（新規）。設定した通知先に届くかを、

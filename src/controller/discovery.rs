@@ -50,11 +50,10 @@ pub struct DiscoveryReport {
     /// State transitions this cycle caused.
     pub transitions: Vec<StateTransition>,
     /// Diagnoses drawn from the resulting picture.
+    ///
+    /// Reported, not acted on. Incidents are opened and notified by the
+    /// diagnosis loop, which is the only place that does either.
     pub diagnoses: Vec<crate::diagnosis::Diagnosis>,
-    /// Incidents opened this cycle.
-    pub incidents_opened: usize,
-    /// Incidents resolved this cycle.
-    pub incidents_resolved: usize,
 }
 
 impl DiscoveryReport {
@@ -155,12 +154,17 @@ impl Controller {
             self.store().save_entity_state(state).await?;
         }
 
-        // Diagnosis and correlation run last, over everything this cycle
-        // established.
-        let (diagnoses, incidents) = self.diagnose_and_correlate().await?;
-        report.diagnoses = diagnoses;
-        report.incidents_opened = incidents.opened.len();
-        report.incidents_resolved = incidents.resolved.len();
+        // Diagnosis runs here so a caller of `discover_once` -- the CLI's
+        // `sentinel discover` -- can show what the new picture implies.
+        //
+        // **Correlation deliberately does not.** Opening an incident is what
+        // makes it news, and news is sent from one place: the diagnosis loop,
+        // which notifies. Correlating here as well meant whichever loop ran
+        // first consumed the opening, so an incident that happened to be
+        // opened by a discovery cycle was recorded and never announced. That
+        // is a missed alert, arriving non-deterministically, which is worse
+        // than no alerting at all because it looks like it works.
+        report.diagnoses = self.diagnose().await?;
 
         Ok(report)
     }

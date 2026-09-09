@@ -17,6 +17,21 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.9 での修正
+
+**incident が開いても通知されないことがありました。**
+
+correlation が discovery ループと診断ループの両方で走っており、
+通知を送るのは後者だけでした。先に走ったほうが「開いた」という事実を
+消費するため、**discovery cycle で開かれた incident は記録されるだけで
+一度も通知されません。**
+
+discovery は既定で 5 分ごと、診断は 15 秒ごとなので、両者が重なった
+タイミングの障害だけが静かに落ちます。**非決定的な通知漏れで、
+動いているように見えるぶん通知が無いより悪い**種類の不具合です。
+
+incident を開く場所を診断ループの 1 箇所に統一しました。
+
 ## v0.3.8 での追加
 
 **`sentinel notify test`** — 設定した通知先に届くかを、障害を待たずに確認できます。
