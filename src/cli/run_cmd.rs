@@ -57,6 +57,12 @@ pub async fn discover(cli: &Cli, json: bool) -> anyhow::Result<i32> {
                 "dependencies": report.dependencies,
                 "observations": report.observations,
                 "transitions": report.transitions.len(),
+                "storage_edges": report.storage_edges,
+                "unresolved_storage_servers": report
+                    .unresolved_storage_servers
+                    .iter()
+                    .map(|u| serde_json::json!({"server": u.server, "clients": u.clients}))
+                    .collect::<Vec<_>>(),
             }))?
         );
     } else {
@@ -76,6 +82,24 @@ pub async fn discover(cli: &Cli, json: bool) -> anyhow::Result<i32> {
             report.observations,
             report.transitions.len()
         );
+
+        // Silence here would be the worst outcome: the operator would believe
+        // the storage graph is complete while some of it was skipped.
+        if !report.unresolved_storage_servers.is_empty() {
+            println!("\nNFS mounts that could not be tied to a known host:");
+            for unresolved in &report.unresolved_storage_servers {
+                println!("  {}  mounted by {}", unresolved.server, unresolved.clients.join(", "));
+            }
+            println!(
+                "\nAn address is not an identity, so no entity is created from one.\n\
+                 Declare the host it belongs to, and the rest of its topology follows:\n\n\
+                \x20 [[entities]]\n\
+                \x20 type = \"host\"\n\
+                \x20 name = \"the-fileserver\"\n\
+                \x20 addresses = [\"{}\"]",
+                report.unresolved_storage_servers[0].server
+            );
+        }
     }
 
     // A provider failing is worth a non-zero exit: discovery ran, but the
@@ -631,6 +655,12 @@ fn render_observations(
                 let port = observation.payload.get("port").and_then(|v| v.as_u64());
                 let outcome = observation.payload.get("outcome").and_then(|v| v.as_str());
                 match (address, port, outcome) {
+                    // "ok / refused" reads as a contradiction, and an operator
+                    // who reads it as a bug stops trusting the column. Say what
+                    // the refusal proved, since that is why it is an ok.
+                    (Some(a), Some(p), Some("refused")) => {
+                        format!("{a}:{p} refused the connection (so the host answered)")
+                    }
                     (Some(a), Some(p), Some(o)) => format!("{a}:{p} {o}"),
                     (Some(a), Some(p), None) => format!("{a}:{p}"),
                     _ => String::new(),
@@ -835,6 +865,78 @@ mod tests {
         store.close().await;
 
         assert_eq!(status(&cli, false).await.expect("status"), 2);
+    }
+
+    #[tokio::test]
+    async fn an_open_incident_is_visible_in_status_even_when_every_entity_is_healthy() {
+        // Found on a live cluster: a broken network path between two specific
+        // hosts belongs to no entity, so every host read HEALTHY, the summary
+        // said "31 healthy", and an open CRITICAL sat in `incident list` that
+        // nothing in `status` mentioned. An operator watching `status` had no
+        // way to know.
+        use crate::diagnosis::{kind, Confidence, Diagnosis};
+        use crate::incident::{Incident, Severity};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli = cli_for(&write_config(
+            dir.path(),
+            "\n[[entities]]\ntype = \"host\"\nname = \"node-a\"\n",
+        ));
+        discover(&cli, false).await.expect("discover");
+
+        let config = Config::load(&cli.config).expect("config");
+        let store = SqliteStore::open(&config.database.path).await.expect("store");
+        let node = crate::entity::EntityKey::new("lab", crate::entity::EntityType::Host, "node-a").entity_id();
+
+        let mut incident = Incident::open("cause:path", Severity::Critical);
+        incident.add_diagnosis(
+            Diagnosis::new(
+                kind::PATH_SPECIFIC_NETWORK_FAILURE,
+                "reachability.path_failure",
+                Confidence::High,
+            )
+            .with_summary("node-a is unreachable from one observer but reachable from others")
+            .rooted_at([node]),
+        );
+        store.save_incident("lab", &incident).await.expect("save incident");
+
+        let report = status_cmd::load_report(&store, "lab").await.expect("report");
+        store.close().await;
+
+        assert!(
+            report.entities.iter().all(|e| e.health != "degraded"),
+            "the point of this test is that no entity is unhealthy"
+        );
+        assert_eq!(report.incidents.len(), 1, "{report:#?}");
+        assert!(report.incidents[0].summary.contains("unreachable"));
+        assert_eq!(report.incidents[0].suspected_root_entities, vec!["node-a"]);
+        assert!(!report.is_healthy(), "an open incident is not health");
+
+        let rendered = status_cmd::render(&report);
+        assert!(rendered.contains("Open incidents"), "{rendered}");
+        assert!(rendered.contains("CRITICAL"), "{rendered}");
+
+        assert_eq!(status(&cli, false).await.expect("status"), 2);
+    }
+
+    #[tokio::test]
+    async fn a_resolved_incident_does_not_linger_in_status() {
+        use crate::incident::{Incident, Severity};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli = cli_for(&write_config(dir.path(), ""));
+        discover(&cli, false).await.expect("discover");
+        let config = Config::load(&cli.config).expect("config");
+        let store = SqliteStore::open(&config.database.path).await.expect("store");
+
+        let mut incident = Incident::open("cause:path", Severity::Critical);
+        incident.resolve();
+        store.save_incident("lab", &incident).await.expect("save incident");
+
+        let report = status_cmd::load_report(&store, "lab").await.expect("report");
+        store.close().await;
+
+        assert!(report.incidents.is_empty(), "{report:#?}");
     }
 
     #[tokio::test]

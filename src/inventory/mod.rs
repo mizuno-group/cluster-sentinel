@@ -10,6 +10,7 @@
 //! bad minute would destroy exactly the evidence an incident needs.
 
 mod merge;
+pub mod nfs;
 pub mod slurm;
 pub mod static_config;
 

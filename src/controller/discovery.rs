@@ -41,6 +41,10 @@ impl ProviderReport {
 pub struct DiscoveryReport {
     /// One entry per provider, in the order they ran.
     pub providers: Vec<ProviderReport>,
+    /// `uses_storage` edges derived from reported NFS mounts.
+    pub storage_edges: usize,
+    /// Mounts whose server could not be tied to a known host.
+    pub unresolved_storage_servers: Vec<crate::inventory::nfs::UnresolvedServer>,
     /// Entities in the inventory afterwards.
     pub entities: usize,
     /// Dependency edges afterwards.
@@ -67,6 +71,12 @@ impl DiscoveryReport {
         self.providers.iter().filter(|p| !p.is_ok())
     }
 }
+
+/// How far back to look for a host's most recent mount report.
+///
+/// Only the newest is used; this needs to be deep enough that the other probes
+/// running against the same host in the meantime do not push it out.
+const MOUNT_OBSERVATIONS_PER_HOST: u32 = 64;
 
 impl Controller {
     /// Run one discovery cycle and persist everything it produced.
@@ -133,6 +143,43 @@ impl Controller {
             }
         }
 
+        // Storage topology, derived from the mounts the agents just reported.
+        //
+        // After the providers, because it resolves each mount's server against
+        // the hosts they contributed; before saving, because the edges it adds
+        // are part of the same picture.
+        if self.config().discovery.nfs.enabled {
+            let topology = self.derive_storage_topology(&inventory).await?;
+            report.storage_edges = topology.edges();
+            report.unresolved_storage_servers = topology.unresolved.clone();
+
+            for unresolved in &topology.unresolved {
+                tracing::info!(
+                    server = %unresolved.server,
+                    clients = unresolved.clients.len(),
+                    "an NFS mount names an address belonging to no known host; declare it to include it in diagnosis"
+                );
+            }
+
+            inventory.merge(&topology.snapshot);
+            if let Some(source) = &topology.snapshot.source {
+                inventory.mark_absent_as_stale(source, &topology.snapshot);
+                // A node that moves to another fileserver stops mounting the
+                // first. Without this the graph only ever grows and it keeps
+                // voting in that fileserver's failures.
+                inventory.retract_absent_dependencies(source, &topology.snapshot);
+                let keep: Vec<uuid::Uuid> = topology.snapshot.dependencies.iter().map(|e| e.id).collect();
+                self.store().reconcile_dependencies(source, &keep).await?;
+            }
+            report.providers.push(ProviderReport {
+                provider: crate::inventory::nfs::SOURCE.to_string(),
+                entities: topology.snapshot.entities.len(),
+                dependencies: topology.snapshot.dependencies.len(),
+                error: None,
+            });
+            snapshots.push(topology.snapshot);
+        }
+
         report.entities = inventory.len();
         report.dependencies = inventory.graph().len();
         self.store().save_inventory(&inventory).await?;
@@ -167,6 +214,38 @@ impl Controller {
         report.diagnoses = self.diagnose().await?;
 
         Ok(report)
+    }
+
+    /// Build the storage topology from the latest reported mounts.
+    async fn derive_storage_topology(
+        &self,
+        inventory: &crate::inventory::Inventory,
+    ) -> Result<crate::inventory::nfs::StorageTopology, StoreError> {
+        let environment = self.config().environment.clone();
+        let mut observations = Vec::new();
+
+        for entity in inventory.entities() {
+            if entity.entity_type != crate::entity::EntityType::Host {
+                continue;
+            }
+            // Only the newest mount report counts: an old one describes a
+            // mount table that has since changed.
+            if let Some(latest) = self
+                .store()
+                .recent_observations(entity.id, MOUNT_OBSERVATIONS_PER_HOST)
+                .await?
+                .into_iter()
+                .find(|o| o.probe_id.as_str() == crate::probes::nfs::PROBE_CLIENT_MOUNT)
+            {
+                observations.push(latest);
+            }
+        }
+
+        Ok(crate::inventory::nfs::topology_from_mounts(
+            &environment,
+            inventory,
+            observations.iter(),
+        ))
     }
 
     /// The Slurm provider, if it is enabled.

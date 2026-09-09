@@ -150,10 +150,20 @@ fn summary_of(incident: &Incident) -> String {
         .unwrap_or_else(|| format!("incident {}", incident.fingerprint))
 }
 
-/// Turn what changed into the notifications worth sending.
+/// Turn a reconciliation into the notifications worth sending.
 ///
-/// Note what is absent: nothing is produced for an incident that is merely
-/// still open. Only change is news.
+/// This produces **candidates**, not messages. Whether a candidate is news is
+/// the deduplicator's judgement, because that is the only part that knows what
+/// has already been said -- and it knows it durably, across restarts.
+///
+/// The distinction matters because the alternative was silently lossy. When
+/// this function emitted only what changed in the current pass, an incident
+/// had exactly one chance to be announced, in the fifteen seconds it was
+/// opened. Miss that -- notifications not configured yet, a webhook returning
+/// 500, a controller restarted in that tick -- and the incident stayed silent
+/// for the rest of its life while `sentinel incident list` showed it open. A
+/// monitoring system that has noticed a fault and says nothing is worse than
+/// one that never noticed.
 pub fn notifications_for(update: &IncidentUpdate) -> Vec<Notification> {
     let mut notifications = Vec::new();
 
@@ -167,9 +177,15 @@ pub fn notifications_for(update: &IncidentUpdate) -> Vec<Notification> {
         notifications.push(Notification::for_incident(incident, Trigger::Resolved));
     }
 
-    // An updated incident is only news if something about it changed. The
-    // timeline is the record of that.
     for incident in &update.updated {
+        // Still open, so still a candidate for its opening announcement. The
+        // deduplicator suppresses this on every pass after the one that
+        // delivered it, and an opening is one-shot for the life of the
+        // incident, so a long-running fault is announced exactly once.
+        if incident.status.is_active() {
+            notifications.push(Notification::for_incident(incident, Trigger::Opened));
+        }
+        // Something about it changed as well. The timeline is the record.
         if let Some(trigger) = trigger_for_update(incident) {
             notifications.push(Notification::for_incident(incident, trigger));
         }
@@ -236,11 +252,43 @@ mod tests {
     }
 
     #[test]
-    fn an_unchanged_incident_produces_nothing() {
-        // The single most important property here. Re-notifying every polling
-        // interval is how a monitoring system teaches people to ignore it.
+    fn an_unchanged_incident_offers_only_its_opening_and_only_once() {
+        // Re-notifying every polling interval is how a monitoring system
+        // teaches people to ignore it, so this is still the property that
+        // matters -- but it is now enforced one layer down. Every pass offers
+        // the opening of a still-open incident; the deduplicator sends it once
+        // and never again. That is what lets an opening whose delivery failed
+        // be delivered later instead of being lost with the tick it happened
+        // in.
         let update = IncidentUpdate {
             updated: vec![incident(Severity::Critical)],
+            ..Default::default()
+        };
+        let notifications = notifications_for(&update);
+
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].trigger, Trigger::Opened);
+
+        let mut deduplicator = Deduplicator::new();
+        assert!(deduplicator.should_send(&notifications[0], "webhook"));
+        deduplicator.record(&notifications[0], "webhook");
+
+        // Every subsequent pass, for as long as the incident lasts.
+        for _ in 0..10 {
+            let again = notifications_for(&update);
+            assert!(!deduplicator.should_send(&again[0], "webhook"));
+        }
+    }
+
+    #[test]
+    fn a_resolved_incident_offers_no_opening() {
+        // The opening candidate is scoped to incidents that are still active,
+        // so a resolution is not accompanied by a stale announcement of it.
+        let mut resolved = incident(Severity::Critical);
+        resolved.resolve();
+
+        let update = IncidentUpdate {
+            updated: vec![resolved],
             ..Default::default()
         };
         assert!(notifications_for(&update).is_empty());
@@ -256,14 +304,12 @@ mod tests {
             ..Default::default()
         };
         let notifications = notifications_for(&update);
+        let escalation = notifications
+            .iter()
+            .find(|n| n.trigger == Trigger::Escalated)
+            .expect("an escalation is news");
 
-        assert_eq!(notifications.len(), 1);
-        assert_eq!(notifications[0].trigger, Trigger::Escalated);
-        assert!(
-            notifications[0].title.contains("escalated"),
-            "{}",
-            notifications[0].title
-        );
+        assert!(escalation.title.contains("escalated"), "{}", escalation.title);
     }
 
     #[test]
@@ -278,7 +324,9 @@ mod tests {
             updated: vec![incident],
             ..Default::default()
         };
-        assert_eq!(notifications_for(&update)[0].trigger, Trigger::DiagnosisChanged);
+        assert!(notifications_for(&update)
+            .iter()
+            .any(|n| n.trigger == Trigger::DiagnosisChanged));
     }
 
     #[test]

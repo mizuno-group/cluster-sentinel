@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use super::{Criticality, DependencyEdge, DependencyType};
-use crate::entity::EntityId;
+use crate::entity::{DiscoverySource, EntityId};
 
 /// An entity reached by a traversal, with the distance it was reached at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -143,6 +143,28 @@ impl DependencyGraph {
         }
         groups.retain(|_, members| members.len() > 1);
         groups
+    }
+
+    /// Drop every edge this source reported that is not in `keep`.
+    ///
+    /// A derived graph has to be able to shrink. A node that moves from one
+    /// fileserver to another stops mounting the first, and an edge that only
+    /// ever accumulates would keep it voting in that fileserver's failures
+    /// forever -- turning a graph derived from evidence into one that merely
+    /// remembers everything ever true.
+    ///
+    /// Scoped to one source, so a provider going quiet cannot delete another's
+    /// findings.
+    pub fn retain_from_source(&mut self, source: &DiscoverySource, keep: &BTreeSet<uuid::Uuid>) -> Vec<uuid::Uuid> {
+        let mut dropped = Vec::new();
+        self.edges.retain(|edge| {
+            let keep_it = &edge.discovery_source != source || keep.contains(&edge.id);
+            if !keep_it {
+                dropped.push(edge.id);
+            }
+            keep_it
+        });
+        dropped
     }
 
     /// Edges of a given type where `entity` is the dependent side.

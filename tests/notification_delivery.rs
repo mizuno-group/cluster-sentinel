@@ -13,7 +13,7 @@
 use sentinel::config::Config;
 use sentinel::controller::Controller;
 use sentinel::entity::{EntityId, EntityKey, EntityType};
-use sentinel::notification::{notifications_for, Trigger};
+use sentinel::notification::{notifications_for, Deduplicator, Trigger};
 use sentinel::observation::{Observation, ProbeStatus};
 use sentinel::persistence::SqliteStore;
 
@@ -29,12 +29,9 @@ fn observer() -> EntityId {
     EntityKey::new("lab", EntityType::Host, "watcher").entity_id()
 }
 
-/// A controller that knows one host, with no background loops running.
-async fn controller() -> Controller {
-    // Declared in the configuration rather than injected, so that a discovery
-    // cycle re-declares them. Capabilities are retracted per source, and a
-    // static provider with nothing to say retracts what it once said.
-    let config = Config::from_toml(
+/// The configuration every controller in this file shares.
+fn config() -> Config {
+    Config::from_toml(
         r#"
 config_version = 1
 environment = "lab"
@@ -55,10 +52,26 @@ name = "watcher"
 "#,
         std::path::Path::new("test.toml"),
     )
-    .expect("config");
+    .expect("config")
+}
+
+/// A controller that knows one host, with no background loops running.
+async fn controller() -> Controller {
+    // Declared in the configuration rather than injected, so that a discovery
+    // cycle re-declares them. Capabilities are retracted per source, and a
+    // static provider with nothing to say retracts what it once said.
+    let config = config();
 
     let store = SqliteStore::open_in_memory().await.expect("store");
     let mut controller = Controller::new(config, store).await.expect("controller");
+    controller.discover_once().await.expect("initial discovery");
+    controller
+}
+
+/// The same controller, but on disk, so it can be restarted.
+async fn controller_at(path: &std::path::Path) -> Controller {
+    let store = SqliteStore::open(path).await.expect("store");
+    let mut controller = Controller::new(config(), store).await.expect("controller");
     controller.discover_once().await.expect("initial discovery");
     controller
 }
@@ -109,4 +122,101 @@ async fn the_diagnosis_pass_opens_it_and_produces_a_notification() {
     let notifications = notifications_for(&update);
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].trigger, Trigger::Opened);
+}
+
+#[tokio::test]
+async fn an_incident_nobody_was_told_about_is_still_announced_after_a_restart() {
+    // The second way an alert went missing, and the harder one to see. An
+    // incident had exactly one chance to be announced: the pass that opened
+    // it. A controller restarted after that pass resumes its open incidents
+    // -- correctly, so it does not re-alert on everything an operator is
+    // already handling -- and from then on the incident is never "opened"
+    // again, so it is never news, so it is never sent. It stays open and
+    // silent for as long as the fault lasts.
+    //
+    // Seen on a live cluster: `incident list` showed one open CRITICAL, and
+    // the webhook had never fired for it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("sentinel.db");
+
+    {
+        let mut controller = controller_at(&path).await;
+        report_ssh_failure(&mut controller).await;
+        let (_, update) = controller.diagnose_and_correlate().await.expect("correlate");
+        assert_eq!(update.opened.len(), 1, "the incident opens");
+        // And nobody is told: no destinations were configured yet.
+    }
+
+    // Restart.
+    let mut controller = controller_at(&path).await;
+    report_ssh_failure(&mut controller).await;
+    let (_, update) = controller.diagnose_and_correlate().await.expect("correlate");
+
+    assert!(
+        update.opened.is_empty(),
+        "the incident is resumed, not reopened -- which is exactly why it used to go silent"
+    );
+    assert_eq!(update.updated.len(), 1, "{update:#?}");
+
+    let notifications = notifications_for(&update);
+    let opening = notifications
+        .iter()
+        .find(|n| n.trigger == Trigger::Opened)
+        .expect("the open incident is still offered for announcement");
+
+    // Nothing was ever delivered, so nothing suppresses it.
+    let mut deduplicator = Deduplicator::new();
+    deduplicator.seed(
+        controller
+            .store()
+            .load_notifications("lab")
+            .await
+            .expect("notification history"),
+    );
+    assert!(
+        deduplicator.should_send(opening, "ops"),
+        "an incident that was never announced must still be announceable"
+    );
+}
+
+#[tokio::test]
+async fn an_incident_already_announced_stays_quiet_across_a_restart() {
+    // The other half of the same property, and the reason the history is
+    // persisted rather than simply re-announcing every open incident on
+    // startup: a controller restart must not re-alert on faults the operator
+    // is already dealing with.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("sentinel.db");
+
+    let opening = {
+        let mut controller = controller_at(&path).await;
+        report_ssh_failure(&mut controller).await;
+        let (_, update) = controller.diagnose_and_correlate().await.expect("correlate");
+
+        let mut deduplicator = Deduplicator::new();
+        let notifications = notifications_for(&update);
+        let opening = notifications[0].clone();
+        let record = deduplicator.record(&opening, "ops");
+        controller
+            .store()
+            .save_notification(&record)
+            .await
+            .expect("record the delivery");
+        opening
+    };
+
+    let controller = controller_at(&path).await;
+    let mut deduplicator = Deduplicator::new();
+    deduplicator.seed(
+        controller
+            .store()
+            .load_notifications("lab")
+            .await
+            .expect("notification history"),
+    );
+
+    assert!(
+        !deduplicator.should_send(&opening, "ops"),
+        "a restart re-announced an incident the operator had already been told about"
+    );
 }

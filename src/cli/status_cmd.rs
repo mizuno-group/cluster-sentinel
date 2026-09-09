@@ -8,7 +8,8 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crate::entity::{EntityType, LifecycleState, ManagedEntity};
+use crate::entity::{EntityId, EntityType, LifecycleState, ManagedEntity};
+use crate::incident::Incident;
 use crate::inventory::Inventory;
 use crate::persistence::SqliteStore;
 use crate::state::{EntityState, Health};
@@ -43,6 +44,28 @@ pub struct EntityStatus {
     pub capabilities: Vec<String>,
 }
 
+/// One open incident, as `status` presents it.
+///
+/// `status` used to show entity health and nothing else, which meant a whole
+/// class of fault was invisible here: a network path that is broken between
+/// two specific hosts belongs to no single entity, so nothing turns red and
+/// the summary line says everything is healthy while an open CRITICAL sits in
+/// `sentinel incident list`. Health answers "is this thing working"; an
+/// incident answers "is something wrong", and they are not the same question.
+#[derive(Debug, Clone, Serialize)]
+pub struct IncidentSummary {
+    /// Incident id, for `sentinel incident show`.
+    pub id: String,
+    /// How serious it is.
+    pub severity: String,
+    /// Open, recovering or resolved.
+    pub status: String,
+    /// What it says, in one line.
+    pub summary: String,
+    /// Names of the entities suspected of causing it.
+    pub suspected_root_entities: Vec<String>,
+}
+
 /// The whole environment, as `status` presents it.
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusReport {
@@ -50,6 +73,9 @@ pub struct StatusReport {
     pub environment: String,
     /// Entities, grouped by type.
     pub entities: Vec<EntityStatus>,
+    /// Incidents that are still open.
+    #[serde(default)]
+    pub incidents: Vec<IncidentSummary>,
     /// Count per health value.
     pub totals: BTreeMap<String, usize>,
 }
@@ -79,8 +105,35 @@ impl StatusReport {
         Self {
             environment: environment.to_string(),
             entities,
+            incidents: Vec::new(),
             totals,
         }
+    }
+
+    /// Builder: attach the incidents that are still open.
+    pub fn with_incidents(mut self, incidents: &[Incident], inventory: &Inventory) -> Self {
+        let name_of = |id: EntityId| {
+            inventory
+                .get(id)
+                .map(|e| e.canonical_name.clone())
+                .unwrap_or_else(|| id.to_string())
+        };
+
+        self.incidents = incidents
+            .iter()
+            .filter(|incident| incident.status.is_active())
+            .map(|incident| IncidentSummary {
+                id: incident.id.to_string(),
+                severity: incident.severity.to_string(),
+                status: incident.status.to_string(),
+                summary: incident
+                    .primary_diagnosis()
+                    .map(|d| d.summary.clone())
+                    .unwrap_or_else(|| incident.fingerprint.clone()),
+                suspected_root_entities: incident.suspected_root_entities.iter().copied().map(name_of).collect(),
+            })
+            .collect();
+        self
     }
 
     /// Entities that an operator should look at.
@@ -91,8 +144,13 @@ impl StatusReport {
     }
 
     /// Whether anything is wrong.
+    ///
+    /// An open incident counts even when every entity reads healthy: that
+    /// combination is not a contradiction but a fault that belongs to a path
+    /// or a relationship rather than to a machine, and exiting zero on it
+    /// hides exactly the findings this system exists to make.
     pub fn is_healthy(&self) -> bool {
-        self.problems().count() == 0
+        self.problems().count() == 0 && self.incidents.is_empty()
     }
 }
 
@@ -152,7 +210,8 @@ fn type_order(entity_type: &str) -> u8 {
 pub async fn load_report(store: &SqliteStore, environment: &str) -> anyhow::Result<StatusReport> {
     let inventory = store.load_inventory(environment).await?;
     let states = store.load_entity_states(environment).await?;
-    Ok(StatusReport::build(environment, &inventory, &states))
+    let incidents = store.load_active_incidents(environment).await?;
+    Ok(StatusReport::build(environment, &inventory, &states).with_incidents(&incidents, &inventory))
 }
 
 /// Render a status report as text.
@@ -176,6 +235,8 @@ pub fn render(report: &StatusReport) -> String {
         );
         return out;
     }
+
+    out.push_str(&render_incidents(&report.incidents));
 
     let mut current_type = String::new();
     for entity in &report.entities {
@@ -216,6 +277,36 @@ pub fn render(report: &StatusReport) -> String {
         .map(|(health, count)| format!("{count} {health}"))
         .collect();
     out.push_str(&format!("{}\n", summary.join(", ")));
+    out
+}
+
+/// The open incidents, above the entity list because they are the answer to
+/// the question the operator actually asked.
+fn render_incidents(incidents: &[IncidentSummary]) -> String {
+    if incidents.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("\nOpen incidents\n");
+    out.push_str(&"\u{2500}".repeat(60));
+    out.push('\n');
+
+    for incident in incidents {
+        out.push_str(&format!(
+            "{} [{}]  {}\n",
+            incident.severity.to_uppercase(),
+            incident.status,
+            incident.summary
+        ));
+        if !incident.suspected_root_entities.is_empty() {
+            out.push_str(&format!(
+                "  suspected cause: {}\n",
+                incident.suspected_root_entities.join(", ")
+            ));
+        }
+        out.push_str(&format!("  sentinel incident show {}\n", incident.id));
+    }
+
     out
 }
 

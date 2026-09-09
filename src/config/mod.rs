@@ -453,6 +453,35 @@ pub struct DiscoveryConfig {
     /// Slurm discovery.
     #[serde(default)]
     pub slurm: SlurmDiscoveryConfig,
+    /// Storage topology derived from reported NFS mounts.
+    #[serde(default)]
+    pub nfs: NfsDiscoveryConfig,
+}
+
+/// Deriving the storage dependency graph from what the agents report.
+///
+/// On by default, because the alternative is a hand-maintained second copy of
+/// the mount table whose failure mode is silent: diagnosis degrades from one
+/// incident naming the fileserver to one incident per client, and nobody finds
+/// out until the outage that needed it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NfsDiscoveryConfig {
+    /// Whether to derive storage entities and edges from reported mounts.
+    #[serde(default = "default_nfs_discovery")]
+    pub enabled: bool,
+}
+
+fn default_nfs_discovery() -> bool {
+    true
+}
+
+impl Default for NfsDiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_nfs_discovery(),
+        }
+    }
 }
 
 /// Slurm discovery settings. Slurm is one integration among others, never the

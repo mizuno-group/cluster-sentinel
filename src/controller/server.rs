@@ -221,9 +221,25 @@ async fn diagnosis_loop(
     interval: std::time::Duration,
     providers: Vec<Arc<dyn NotificationProvider>>,
 ) {
-    // Notification state lives with the loop: the deduplicator remembers what
-    // has already been said, so a still-open incident stays quiet.
+    // Notification state lives with the loop, but not only in it: the
+    // deduplicator is seeded from what was actually delivered, so a restart
+    // neither re-announces incidents the operator already heard about nor
+    // permanently silences ones that were never successfully announced.
     let mut deduplicator = Deduplicator::new();
+    {
+        let controller = controller.lock().await;
+        let environment = controller.config().environment.clone();
+        match controller.store().load_notifications(&environment).await {
+            Ok(records) => {
+                let count = records.len();
+                deduplicator.seed(records);
+                tracing::debug!(records = count, "resumed notification history");
+            }
+            // Losing the history means saying something twice, which is far
+            // better than the alternative, so this must not stop the loop.
+            Err(error) => tracing::warn!(%error, "cannot resume notification history"),
+        }
+    }
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

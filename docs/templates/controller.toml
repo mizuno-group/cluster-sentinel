@@ -36,10 +36,17 @@ enabled = true
 # 導入初期は "critical" から始めるのも有効です。
 min_severity = "warning"
 
+# 同一宛先への送信間隔の下限。間引きではなく間隔をあけるため、
+# 一度に多数の incident が開いても通知は捨てられず、順に遅れて届きます。
+# 既定値は Slack の incoming webhook の公称上限に合わせてあります。
+min_interval = "1s"
+
 # 宛先。複数指定でき、重複排除は宛先ごとに行われます。
+# format は "generic"（汎用 JSON）か "slack"（Block Kit; 色・太字つき）。
 # [[notification.webhooks]]
-# name = "ntfy"
-# url  = "https://ntfy.example.org/CHANGE-ME"
+# name   = "ntfy"
+# url    = "https://ntfy.example.org/CHANGE-ME"
+# format = "generic"
 
 
 # ===========================================================================
@@ -95,7 +102,16 @@ name = "CHANGE-ME-storage-2"
 # ===========================================================================
 # 依存関係     from が to に依存する
 #
-# ここを書かないと、複数 node が同時に storage 障害を起こしたとき、
+# **NFS については、以下を手で書く必要は通常ありません。**
+# agent が報告するマウント表から、fileserver の host entity・storage entity・
+# provides・uses_storage がすべて自動で導出されます
+# （[discovery.nfs] enabled = false で停止）。
+# 導出結果は `sentinel dependency list` で確認できます。
+# 以下は「導出できないものを手で足す」ための書式例です:
+# NFS 以外の共有ストレージ、どの node もマウントしていない fileserver、
+# マウントが IP で書かれていてその IP を持つ host を Sentinel が知らない場合。
+#
+# 依存関係が無いと、複数 node が同時に storage 障害を起こしたとき、
 # SHARED_STORAGE_FAILURE（原因 = fileserver）ではなく
 # 個別の NFS_CLIENT_FAILURE として報告されます。
 # 5 人が 5 つの症状を追いかけることになります。

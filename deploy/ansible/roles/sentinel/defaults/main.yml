@@ -7,7 +7,7 @@
 #
 # この既定値は Cargo.toml の version と一致していることを
 # tests/ansible_role.rs が強制します。
-sentinel_version: v0.3.13
+sentinel_version: v0.3.14
 
 # このロールが動作する最小バージョン。上の既定を古い版に変える場合も、
 # これより下げることはできません。

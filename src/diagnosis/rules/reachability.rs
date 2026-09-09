@@ -33,6 +33,15 @@ use crate::probes::network::PROBE_ID as NETWORK_PROBE;
 pub struct Verdicts {
     /// Observers that reached the target.
     pub reached: BTreeSet<EntityId>,
+    /// Observers whose connection was actually completed, as opposed to
+    /// refused.
+    ///
+    /// A refusal proves the host is alive, which is all `reached` claims. It
+    /// does not prove the path carries a working connection, and the
+    /// difference matters when nothing is listening on the port being probed:
+    /// then a refusal and a timeout are the same non-event, told apart only by
+    /// whether the firewall in between rejects or drops.
+    pub connected: BTreeSet<EntityId>,
     /// Observers that did not.
     pub failed: BTreeSet<EntityId>,
 }
@@ -54,6 +63,17 @@ impl Verdicts {
     /// Whether observers disagree, which localises the fault to a path.
     pub fn disagree(&self) -> bool {
         !self.failed.is_empty() && !self.reached.is_empty()
+    }
+
+    /// Whether the disagreement is about a working connection.
+    ///
+    /// Without at least one completed connection there is nothing listening on
+    /// the probed port anywhere, and the split between observers says only
+    /// that some firewalls answer a closed port and others drop it. That is
+    /// configuration, not a fault, and a cluster was told one of its head
+    /// nodes had a broken network path because of it.
+    pub fn disagree_about_a_working_path(&self) -> bool {
+        self.disagree() && !self.connected.is_empty()
     }
 }
 
@@ -80,6 +100,9 @@ pub fn verdicts_by_target(context: &DiagnosisContext) -> BTreeMap<EntityId, Verd
 
             if reached(observation) {
                 verdicts.reached.insert(observer);
+                if connected(observation) {
+                    verdicts.connected.insert(observer);
+                }
             } else {
                 verdicts.failed.insert(observer);
             }
@@ -101,6 +124,22 @@ fn reached(observation: &Observation) -> bool {
         return responded;
     }
     !observation.status.is_bad()
+}
+
+/// Whether an observation says the connection actually completed.
+///
+/// Distinct from [`reached`]: that asks whether anything is at the address,
+/// this asks whether the path carries a connection.
+fn connected(observation: &Observation) -> bool {
+    observation
+        .payload
+        .get("outcome")
+        .and_then(|v| v.as_str())
+        .map(|outcome| outcome == "connected")
+        // Older observations, recorded before the outcome was written into the
+        // payload, cannot answer this. Treating them as connected keeps the
+        // rule's previous behaviour for them rather than silently disabling it.
+        .unwrap_or_else(|| !observation.status.is_bad())
 }
 
 /// Evidence ids for a target.
@@ -177,7 +216,7 @@ impl DiagnosisRule for PathSpecificNetworkFailure {
         let mut diagnoses = Vec::new();
 
         for (target, verdicts) in verdicts_by_target(context) {
-            if !verdicts.disagree() {
+            if !verdicts.disagree_about_a_working_path() {
                 continue;
             }
 
@@ -192,7 +231,7 @@ impl DiagnosisRule for PathSpecificNetworkFailure {
                 .map(|e| e.canonical_name.clone())
                 .collect();
             let seeing: Vec<String> = verdicts
-                .reached
+                .connected
                 .iter()
                 .filter_map(|id| context.entity(*id))
                 .map(|e| e.canonical_name.clone())
@@ -264,7 +303,15 @@ mod tests {
         }
 
         /// Record what one observer saw of one target.
-        fn saw(mut self, observer: &str, target: &str, responded: bool) -> Self {
+        fn saw(self, observer: &str, target: &str, responded: bool) -> Self {
+            let outcome = if responded { "connected" } else { "timed_out" };
+            self.saw_outcome(observer, target, outcome)
+        }
+
+        /// Record a specific connection outcome, which is what tells a
+        /// completed connection from a refusal.
+        fn saw_outcome(mut self, observer: &str, target: &str, outcome: &str) -> Self {
+            let responded = matches!(outcome, "connected" | "refused");
             let status = if responded {
                 ProbeStatus::Ok
             } else {
@@ -273,7 +320,7 @@ mod tests {
             self.observations.insert(
                 Observation::new(ProbeId::new(NETWORK_PROBE), host(target), status)
                     .with_observer(host(observer))
-                    .with_payload(serde_json::json!({"host_responded": responded})),
+                    .with_payload(serde_json::json!({"host_responded": responded, "outcome": outcome})),
             );
             self
         }
@@ -326,6 +373,41 @@ mod tests {
 
         assert!(world.evaluate(&HostUnreachable).is_empty());
         assert!(world.evaluate(&PathSpecificNetworkFailure).is_empty());
+    }
+
+    #[test]
+    fn refusals_on_a_closed_port_are_not_a_path_fault() {
+        // Found on a live cluster. SSH had been moved off 22, so the probe
+        // knocked on a port nothing was listening on. Two observers' kernels
+        // sent RST -- "refused", which counts as reached, because a dead host
+        // does not send RST. A third sat behind a firewall that drops instead,
+        // and timed out. That split is firewall policy on a closed port, and
+        // it was reported as a broken network path to the head node, at
+        // CRITICAL, for as long as the port stayed wrong.
+        let world = World::new(&["target", "a", "b", "c"])
+            .saw_outcome("a", "target", "refused")
+            .saw_outcome("b", "target", "refused")
+            .saw_outcome("c", "target", "timed_out");
+
+        assert!(
+            world.evaluate(&PathSpecificNetworkFailure).is_empty(),
+            "nothing was listening anywhere; there is no working path to be missing"
+        );
+        assert!(world.evaluate(&HostUnreachable).is_empty(), "the host plainly answered");
+    }
+
+    #[test]
+    fn one_completed_connection_is_enough_to_localise_a_path_fault() {
+        // The other side of the same line: once something has actually
+        // connected, an observer that cannot is a real difference.
+        let world = World::new(&["target", "a", "b", "c"])
+            .saw_outcome("a", "target", "connected")
+            .saw_outcome("b", "target", "refused")
+            .saw_outcome("c", "target", "timed_out");
+
+        let diagnoses = world.evaluate(&PathSpecificNetworkFailure);
+        assert_eq!(diagnoses.len(), 1, "{diagnoses:#?}");
+        assert!(diagnoses[0].is(kind::PATH_SPECIFIC_NETWORK_FAILURE));
     }
 
     #[test]

@@ -101,7 +101,7 @@ pub fn config_file_for(role: Role, detected: Detected) -> String {
     out.push_str(&tls_section(role));
 
     if role == Role::Controller {
-        out.push_str(&notification_section());
+        out.push_str(&notification_section(&defaults));
         out.push_str(&inventory_section());
     } else {
         out.push_str(&agent_capabilities_section());
@@ -361,21 +361,42 @@ fn tls_section(role: Role) -> String {
     )
 }
 
-fn notification_section() -> String {
-    String::from(
+fn notification_section(defaults: &Config) -> String {
+    let n = &defaults.notification;
+    format!(
         "\n\
 # ===========================================================================
 # 通知
 #
 # 状態が変化したときだけ送信します。継続中の incident は繰り返し通知しません。
+#
+#   min_severity  この深刻度未満は送りません
+#   min_interval  同一宛先への送信間隔の下限。**間引きではなく間隔をあけます**
+#                 ので、一度に多数の incident が開いても通知は捨てられず、
+#                 順に遅れて届きます。既定値は Slack の incoming webhook が
+#                 公称している上限に合わせてあります。webhook 側がより厳しい
+#                 場合は伸ばしてください。
+#
+# 宛先は複数書けます。宛先ごとに重複排除は独立しているため、
+# 片方を黙らせてももう片方は届きます。
+#
+#   format = \"generic\"  汎用の JSON（text / content も入るので大半の受け口が通ります）
+#   format = \"slack\"    Slack Block Kit（色つきの帯・太字・アイコン）
+#
+# 書き終えたら `sentinel notify test` で疎通を確認できます。
+# 障害を待つ必要はなく、宛先ごとに 1 通だけ送ります。
 # ===========================================================================
 # [notification]
-# min_severity = \"warning\"          # \"info\" / \"warning\" / \"critical\"
+# min_severity = \"{severity}\"          # \"info\" / \"warning\" / \"critical\"
+# min_interval = \"{interval}\"
 #
 # [[notification.webhooks]]
-# name = \"ops\"
-# url  = \"https://example.invalid/hooks/sentinel\"
+# name   = \"ops\"
+# url    = \"https://example.invalid/hooks/sentinel\"
+# format = \"generic\"
 ",
+        severity = n.min_severity,
+        interval = duration(n.min_interval),
     )
 }
 
@@ -383,14 +404,27 @@ fn inventory_section() -> String {
     format!(
         "\n\
 # ===========================================================================
-# Slurm の外にある host と storage
+# storage の依存関係（**通常は書く必要がありません**）
 #
-# Slurm discovery では見つからないため、ここで宣言します。
-# agent を入れる予定の host も、先に書いておいて構いません（merge されます）。
+# NFS の依存関係は agent の報告するマウント表から自動で導出されます。
+# fileserver の host entity、storage entity、provides、uses_storage の
+# すべてが、各 node が実際にマウントしているものから作られます。
+# マウント構成を変えても、この設定ファイルを触る必要はありません。
 #
-# 依存関係を書かないと、複数 node の storage 障害が
-# SHARED_STORAGE_FAILURE（原因 = fileserver）ではなく
-# 個別の NFS_CLIENT_FAILURE として報告されます。
+# 導出されたものは `sentinel dependency list` で確認できます。
+# 止めるには [discovery.nfs] enabled = false。
+#
+# 手で書く必要があるのは次の場合だけです:
+#
+#   * マウントが名前ではなく IP で書かれていて、その IP を持つ host を
+#     Sentinel が知らない。address は identity ではない（ADR 0001）ため、
+#     IP から entity を作ることはしません。discover の出力が
+#     「どの IP が解決できなかったか」を報告するので、その host を
+#     下記の [[entities]] で宣言してください。
+#   * NFS 以外の共有ストレージ（Lustre、GPFS、オブジェクトストレージなど）
+#   * どの node もマウントしていないが監視したい fileserver
+#
+# 手で書いた宣言は導出結果と併存します（打ち消されません）。
 # ===========================================================================
 # [[entities]]
 # type = \"host\"
@@ -484,6 +518,36 @@ mod tests {
         assert_eq!(generated.retention, defaults.retention);
         assert_eq!(generated.peer_monitoring, defaults.peer_monitoring);
         assert_eq!(generated.database, defaults.database);
+    }
+
+    #[test]
+    fn the_notification_block_shows_the_compiled_defaults_and_parses_when_uncommented() {
+        // For most operators this commented block is the only place they will
+        // ever learn that min_interval exists. A number that has drifted from
+        // the default teaches the wrong one, and a block that does not parse
+        // wastes the outage it was uncommented during.
+        let text = config_file(Role::Controller);
+        let block: String = text
+            .lines()
+            .skip_while(|line| !line.starts_with("# [notification]"))
+            .take_while(|line| line.starts_with('#'))
+            .map(|line| line.trim_start_matches('#').trim_start())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(block.starts_with("[notification]"), "{text}");
+        assert!(block.contains("[[notification.webhooks]]"), "{block}");
+
+        let uncommented = format!(
+            "config_version = {}\nenvironment = \"test\"\n{block}",
+            crate::CONFIG_VERSION
+        );
+        let config = Config::from_toml(&uncommented, std::path::Path::new("generated"))
+            .unwrap_or_else(|error| panic!("the notification block does not parse: {error}\n{block}"));
+
+        let defaults = Config::default();
+        assert_eq!(config.notification.min_severity, defaults.notification.min_severity);
+        assert_eq!(config.notification.min_interval, defaults.notification.min_interval);
+        assert_eq!(config.notification.webhooks.len(), 1, "one example destination");
     }
 
     #[test]

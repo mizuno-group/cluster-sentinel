@@ -43,6 +43,33 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Delete the dependency rows this source no longer reports.
+    ///
+    /// `save_inventory` only ever upserts, so an edge removed from the graph
+    /// would come straight back on the next load. Scoped to one source, for
+    /// the same reason capabilities are: one provider going quiet must not
+    /// delete another's findings.
+    pub async fn reconcile_dependencies(
+        &self,
+        source: &DiscoverySource,
+        keep: &[uuid::Uuid],
+    ) -> Result<u64, StoreError> {
+        let ids: Vec<String> = keep.iter().map(|id| id.to_string()).collect();
+        let placeholders = if ids.is_empty() {
+            String::new()
+        } else {
+            format!(" AND id NOT IN ({})", vec!["?"; ids.len()].join(", "))
+        };
+
+        let sql = format!("DELETE FROM dependencies WHERE discovery_source = ?{placeholders}");
+        let mut query = sqlx::query(&sql).bind(source.as_str());
+        for id in &ids {
+            query = query.bind(id);
+        }
+
+        Ok(query.execute(self.pool()).await?.rows_affected())
+    }
+
     /// Bring one provider's capability claims for an entity up to date.
     ///
     /// Capabilities are unioned across providers, because each knows different

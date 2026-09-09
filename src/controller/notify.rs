@@ -86,6 +86,17 @@ impl Controller {
         let notifications = notifications_for(update);
         let mut last_send: Option<std::time::Instant> = None;
 
+        // A resolved incident's opening is no longer the last word on it. Drop
+        // the record so the same fault returning next week is announced rather
+        // than mistaken for the one already reported.
+        for incident in &update.resolved {
+            for key in deduplicator.forget_opening(&incident.fingerprint) {
+                if let Err(error) = self.store().forget_notifications(&key).await {
+                    tracing::warn!(%error, "cannot clear a delivery record for a resolved incident");
+                }
+            }
+        }
+
         for notification in &notifications {
             // A recovery is always worth hearing, whatever its severity: an
             // operator told about a fault is owed the ending.
@@ -119,7 +130,13 @@ impl Controller {
 
                 match provider.send(notification).await {
                     Ok(()) => {
-                        deduplicator.record(notification, provider.name());
+                        let record = deduplicator.record(notification, provider.name());
+                        // Persisted, so a restart does not turn "already told
+                        // them" into "never told them" -- the two are the same
+                        // silence from the outside, and only one is right.
+                        if let Err(error) = self.store().save_notification(&record).await {
+                            tracing::warn!(%error, "cannot record that a notification was delivered");
+                        }
                         outcome.sent += 1;
                         tracing::info!(
                             provider = provider.name(),
@@ -129,8 +146,10 @@ impl Controller {
                         );
                     }
                     Err(error) => {
-                        // Not recorded, so a transient failure is retried on
-                        // the next pass rather than being lost.
+                        // Not recorded, so the next pass offers this
+                        // notification again. That retry only works because
+                        // the candidates include incidents that are merely
+                        // still open, not just those that changed this tick.
                         outcome.failed += 1;
                         tracing::warn!(provider = provider.name(), %error, "cannot deliver notification");
                     }
@@ -214,6 +233,14 @@ mod tests {
         (provider, sent)
     }
 
+    fn failing(name: &str) -> Arc<dyn NotificationProvider> {
+        Arc::new(Recording {
+            name: name.into(),
+            sent: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            fail: true,
+        }) as Arc<dyn NotificationProvider>
+    }
+
     fn incident(severity: Severity, affected: &[&str]) -> Incident {
         let mut incident = Incident::open("cause:fs1", severity);
         incident.add_diagnosis(
@@ -270,26 +297,187 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unchanged_incident_notifies_nobody() {
+    async fn an_incident_already_announced_notifies_nobody_again() {
+        // The property that matters: a still-open incident is offered on every
+        // pass, and sent on exactly one of them.
         let mut controller = controller("warning").await;
         let (provider, sent) = recording("test");
         let update = IncidentUpdate {
             updated: vec![incident(Severity::Critical, &["fs1"])],
             ..Default::default()
         };
+        let mut deduplicator = Deduplicator::new();
+        let maintenance = MaintenanceWindows::new();
 
-        let outcome = controller
+        let first = controller
             .notify(
                 &update,
+                std::slice::from_ref(&provider),
+                &mut deduplicator,
+                &maintenance,
+            )
+            .await
+            .expect("notify");
+        assert_eq!(first.sent, 1, "the opening is announced once");
+
+        for _ in 0..5 {
+            let again = controller
+                .notify(
+                    &update,
+                    std::slice::from_ref(&provider),
+                    &mut deduplicator,
+                    &maintenance,
+                )
+                .await
+                .expect("notify");
+            assert_eq!(again.sent, 0);
+        }
+        assert_eq!(sent.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_incident_that_was_never_announced_is_announced_later() {
+        // The regression this exists for. An incident had one chance to be
+        // heard about -- the fifteen-second pass it was opened in. If
+        // notifications were not configured yet, or the webhook returned 500,
+        // or the controller restarted in that tick, it stayed silent for the
+        // rest of its life while `sentinel incident list` showed it open.
+        let mut controller = controller("warning").await;
+        let open = incident(Severity::Critical, &["fs1"]);
+        let maintenance = MaintenanceWindows::new();
+        let mut deduplicator = Deduplicator::new();
+
+        // The pass that opened it: no destinations configured at all.
+        let missed = controller
+            .notify(
+                &IncidentUpdate {
+                    opened: vec![open.clone()],
+                    ..Default::default()
+                },
+                &[],
+                &mut deduplicator,
+                &maintenance,
+            )
+            .await
+            .expect("notify");
+        assert_eq!(missed.sent, 0);
+
+        // Later, with a destination configured, the incident merely still open.
+        let (provider, sent) = recording("test");
+        let outcome = controller
+            .notify(
+                &IncidentUpdate {
+                    updated: vec![open],
+                    ..Default::default()
+                },
                 &[provider],
-                &mut Deduplicator::new(),
-                &MaintenanceWindows::new(),
+                &mut deduplicator,
+                &maintenance,
             )
             .await
             .expect("notify");
 
-        assert_eq!(outcome.sent, 0);
-        assert!(sent.lock().await.is_empty());
+        assert_eq!(outcome.sent, 1, "the operator is told about the open incident");
+        assert_eq!(sent.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_delivery_failure_is_retried_on_the_next_pass() {
+        // The comment in notify() used to claim this while the code could not
+        // do it: the next pass no longer carried the incident.
+        let mut controller = controller("warning").await;
+        let open = incident(Severity::Critical, &["fs1"]);
+        let maintenance = MaintenanceWindows::new();
+        let mut deduplicator = Deduplicator::new();
+
+        let failing = failing("test");
+        let attempt = controller
+            .notify(
+                &IncidentUpdate {
+                    opened: vec![open.clone()],
+                    ..Default::default()
+                },
+                &[failing],
+                &mut deduplicator,
+                &maintenance,
+            )
+            .await
+            .expect("notify");
+        assert_eq!(attempt.failed, 1);
+        assert_eq!(attempt.sent, 0);
+
+        let (provider, sent) = recording("test");
+        let retry = controller
+            .notify(
+                &IncidentUpdate {
+                    updated: vec![open],
+                    ..Default::default()
+                },
+                &[provider],
+                &mut deduplicator,
+                &maintenance,
+            )
+            .await
+            .expect("notify");
+
+        assert_eq!(retry.sent, 1);
+        assert_eq!(sent.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_resolved_incident_can_be_announced_again_when_the_fault_returns() {
+        // forget_opening() at work: the one-shot rule must not outlive the
+        // incident it was protecting.
+        let mut controller = controller("warning").await;
+        let open = incident(Severity::Critical, &["fs1"]);
+        let maintenance = MaintenanceWindows::new();
+        let mut deduplicator = Deduplicator::new();
+        let (provider, sent) = recording("test");
+
+        controller
+            .notify(
+                &IncidentUpdate {
+                    opened: vec![open.clone()],
+                    ..Default::default()
+                },
+                std::slice::from_ref(&provider),
+                &mut deduplicator,
+                &maintenance,
+            )
+            .await
+            .expect("notify");
+
+        let mut resolved = open.clone();
+        resolved.resolve();
+        controller
+            .notify(
+                &IncidentUpdate {
+                    resolved: vec![resolved],
+                    ..Default::default()
+                },
+                std::slice::from_ref(&provider),
+                &mut deduplicator,
+                &maintenance,
+            )
+            .await
+            .expect("notify");
+
+        // The same fingerprint faults again, and is opened afresh.
+        let returned = controller
+            .notify(
+                &IncidentUpdate {
+                    opened: vec![incident(Severity::Critical, &["fs1"])],
+                    ..Default::default()
+                },
+                &[provider],
+                &mut deduplicator,
+                &maintenance,
+            )
+            .await
+            .expect("notify");
+
+        assert_eq!(returned.sent, 1, "a fault that returns is news again");
+        assert_eq!(sent.lock().await.len(), 3, "opened, resolved, opened");
     }
 
     #[tokio::test]

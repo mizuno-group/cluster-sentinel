@@ -26,12 +26,23 @@ pub const DEFAULT_LEASE_MINUTES: i64 = 60;
 /// A notification that has been sent.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NotificationRecord {
+    /// The incident it concerned.
+    pub incident_id: String,
     /// The key that identifies this piece of news.
     pub deduplication_key: String,
     /// Which provider sent it.
     pub provider: String,
     /// When it was sent.
     pub sent_at: Timestamp,
+}
+
+/// The suffix a deduplication key carries when it announces an opening.
+///
+/// An opening is announced **once per incident**, so its record must not
+/// expire the way repeatable news does. Keyed off [`Trigger::Opened`], and a
+/// test below holds the two together.
+fn is_opening(deduplication_key: &str) -> bool {
+    deduplication_key.ends_with(&format!(":{}", super::Trigger::Opened.as_str()))
 }
 
 /// Decides whether a notification is new.
@@ -71,12 +82,39 @@ impl Deduplicator {
     }
 
     /// Whether this notification should be sent by this provider.
+    ///
+    /// The lease applies to news that can genuinely recur. **An opening
+    /// cannot**: an incident is opened once, and re-announcing the same
+    /// still-open incident an hour later is the behaviour this module exists
+    /// to prevent. So an opening is sent only while no record of it exists,
+    /// and the record is dropped when the incident resolves, which is what
+    /// makes a genuine reopening audible again.
     pub fn should_send(&self, notification: &Notification, provider: &str) -> bool {
         let key = (provider.to_string(), notification.deduplication_key());
         match self.sent.get(&key) {
             None => true,
+            Some(_) if is_opening(&key.1) => false,
             Some(sent_at) => now() - *sent_at >= chrono::Duration::minutes(self.lease_minutes),
         }
+    }
+
+    /// Forget that an incident's opening was announced.
+    ///
+    /// Called when the incident resolves: the same fault returning later is
+    /// new news, and would otherwise be silenced by the one-shot rule above.
+    /// Returns the keys dropped, so the persisted records can follow.
+    pub fn forget_opening(&mut self, fingerprint: &str) -> Vec<String> {
+        let suffix = format!(":{}", super::Trigger::Opened.as_str());
+        let key = format!("{fingerprint}{suffix}");
+        let mut dropped = Vec::new();
+        self.sent.retain(|(_, existing), _| {
+            let keep = existing != &key;
+            if !keep {
+                dropped.push(existing.clone());
+            }
+            keep
+        });
+        dropped
     }
 
     /// Record that a notification was sent.
@@ -85,6 +123,7 @@ impl Deduplicator {
         self.sent
             .insert((provider.to_string(), notification.deduplication_key()), sent_at);
         NotificationRecord {
+            incident_id: notification.incident_id.clone(),
             deduplication_key: notification.deduplication_key(),
             provider: provider.to_string(),
             sent_at,
@@ -107,10 +146,15 @@ impl Deduplicator {
     }
 
     /// Drop records older than the lease, so the map does not grow forever.
+    ///
+    /// Openings are exempt: theirs is not a lease that expires but a record
+    /// that this incident has been announced, and dropping it would make the
+    /// controller announce a long-running incident all over again.
     pub fn prune(&mut self) -> usize {
         let cutoff = now() - chrono::Duration::minutes(self.lease_minutes * 2);
         let before = self.sent.len();
-        self.sent.retain(|_, sent_at| *sent_at >= cutoff);
+        self.sent
+            .retain(|(_, key), sent_at| is_opening(key) || *sent_at >= cutoff);
         before - self.sent.len()
     }
 }
@@ -189,10 +233,68 @@ mod tests {
     #[test]
     fn the_lease_expires_so_a_recurring_fault_is_heard_about_again() {
         let mut deduplicator = Deduplicator::new().with_lease_minutes(0);
-        let notification = notification(Trigger::Opened);
+        let notification = notification(Trigger::Escalated);
 
         deduplicator.record(&notification, "webhook");
         assert!(deduplicator.should_send(&notification, "webhook"));
+    }
+
+    #[test]
+    fn an_opening_is_announced_once_however_long_the_incident_lasts() {
+        // Every pass offers the opening of a still-open incident, which is
+        // what lets an undelivered one be delivered later. If the lease
+        // applied to it, a week-long incident would re-announce itself every
+        // hour, which is precisely the behaviour this module exists to stop.
+        let mut deduplicator = Deduplicator::new().with_lease_minutes(0);
+        let notification = notification(Trigger::Opened);
+
+        deduplicator.record(&notification, "webhook");
+        assert!(!deduplicator.should_send(&notification, "webhook"));
+    }
+
+    #[test]
+    fn pruning_does_not_forget_that_an_opening_was_announced() {
+        // prune() exists to bound memory. Letting it drop opening records
+        // would silently reintroduce the repeat it is unrelated to.
+        let mut deduplicator = Deduplicator::new().with_lease_minutes(0);
+        let notification = notification(Trigger::Opened);
+
+        deduplicator.record(&notification, "webhook");
+        deduplicator.prune();
+        assert!(!deduplicator.should_send(&notification, "webhook"));
+    }
+
+    #[test]
+    fn forgetting_an_opening_makes_the_same_fault_audible_again() {
+        // Called when the incident resolves. The same fingerprint returning
+        // next week is new news, not the old announcement.
+        let mut deduplicator = Deduplicator::new();
+        let notification = notification(Trigger::Opened);
+
+        deduplicator.record(&notification, "webhook");
+        let dropped = deduplicator.forget_opening(&notification.fingerprint);
+
+        assert_eq!(dropped, vec![notification.deduplication_key()]);
+        assert!(deduplicator.should_send(&notification, "webhook"));
+    }
+
+    #[test]
+    fn forgetting_an_opening_leaves_other_news_about_it_alone() {
+        let mut deduplicator = Deduplicator::new();
+        let resolved = notification(Trigger::Resolved);
+
+        deduplicator.record(&resolved, "webhook");
+        assert!(deduplicator.forget_opening(&resolved.fingerprint).is_empty());
+        assert!(!deduplicator.should_send(&resolved, "webhook"));
+    }
+
+    #[test]
+    fn the_one_shot_rule_is_tied_to_the_trigger_it_names() {
+        // is_opening() matches on the key's text. If Trigger::Opened were
+        // renamed, openings would silently start expiring again.
+        let key = notification(Trigger::Opened).deduplication_key();
+        assert!(is_opening(&key));
+        assert!(!is_opening(&notification(Trigger::Resolved).deduplication_key()));
     }
 
     #[test]
@@ -201,6 +303,7 @@ mod tests {
         let notification = notification(Trigger::Opened);
         let mut deduplicator = Deduplicator::new();
         deduplicator.seed([NotificationRecord {
+            incident_id: notification.incident_id.clone(),
             deduplication_key: notification.deduplication_key(),
             provider: "webhook".into(),
             sent_at: now(),
@@ -224,7 +327,9 @@ mod tests {
     #[test]
     fn pruning_drops_stale_records_but_keeps_current_ones() {
         let mut deduplicator = Deduplicator::new();
-        deduplicator.record(&notification(Trigger::Opened), "webhook");
+        // Not an opening: those are exempt from pruning by design, and are
+        // covered by their own test above.
+        deduplicator.record(&notification(Trigger::Escalated), "webhook");
         assert_eq!(deduplicator.prune(), 0, "a fresh record is kept");
         assert_eq!(deduplicator.len(), 1);
 

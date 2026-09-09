@@ -163,6 +163,22 @@ impl Inventory {
         outcome
     }
 
+    /// Drop the dependencies this source used to report and no longer does.
+    ///
+    /// The entity half of this is [`Inventory::mark_absent_as_stale`]. Edges
+    /// are removed outright rather than marked stale: an edge that is no
+    /// longer reported is not a machine that might come back, it is a relation
+    /// that has ended, and leaving it in the graph keeps a node voting in the
+    /// failures of a fileserver it no longer mounts.
+    pub fn retract_absent_dependencies(
+        &mut self,
+        source: &DiscoverySource,
+        snapshot: &InventorySnapshot,
+    ) -> Vec<uuid::Uuid> {
+        let keep: BTreeSet<uuid::Uuid> = snapshot.dependencies.iter().map(|edge| edge.id).collect();
+        self.graph.retain_from_source(source, &keep)
+    }
+
     /// Insert an entity directly, replacing any entity with the same id.
     ///
     /// Used when rehydrating from the database, where the merge rules have

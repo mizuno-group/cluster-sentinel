@@ -6,6 +6,7 @@
 
 mod entities;
 mod incidents;
+mod notifications;
 mod observations;
 mod retention;
 mod sqlite;
