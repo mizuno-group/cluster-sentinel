@@ -256,12 +256,21 @@ impl Probe for NfsExportsProbe {
         }
 
         if found.read > 0 {
-            return Observation::new(PROBE_SERVER_EXPORTS.into(), context.target_entity, ProbeStatus::Failed)
-                .with_payload(serde_json::json!({"exports": [], "export_count": 0}))
-                .with_error(
-                    "no_exports",
-                    "the export list is empty; clients will be refused, not timed out",
-                );
+            // Stated, not judged. "This host exports nothing" is a fact;
+            // whether it is a fault depends on whether anything is listening
+            // on 2049, and only a rule sees both. The capability that gates
+            // this probe is detected from `/etc/exports` existing or
+            // `exportfs` being installed -- true of any host with the NFS
+            // packages, including every client -- so treating an empty list as
+            // a failure here reported a compute node that exports nothing, and
+            // was never meant to, as a broken fileserver.
+            return Observation::new(PROBE_SERVER_EXPORTS.into(), context.target_entity, ProbeStatus::Ok).with_payload(
+                serde_json::json!({
+                    "exports": [],
+                    "export_count": 0,
+                    "sources_read": found.read,
+                }),
+            );
         }
 
         // Nothing to read at all is not a fault: this host may export through
@@ -343,19 +352,19 @@ mod tests {
         std::fs::write(dir.path().join("exports.d/zfs.exports.bak"), "/old *(rw)\n").expect("bak");
 
         let observation = probe_over(dir.path()).collect(&exports_context()).await;
-        assert_eq!(observation.status, ProbeStatus::Failed, "genuinely nothing is exported");
-        assert_eq!(observation.error_code.as_deref(), Some("no_exports"));
+        assert_eq!(observation.status, ProbeStatus::Ok);
+        assert_eq!(observation.payload["export_count"], 0, "the .bak file is not an export");
     }
 
     #[tokio::test]
-    async fn a_server_with_nothing_exported_anywhere_is_still_a_fault() {
+    async fn a_host_exporting_nothing_anywhere_reports_a_count_of_zero() {
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("exports"), "# see exports(5)\n").expect("exports");
         std::fs::create_dir(dir.path().join("exports.d")).expect("dir");
 
         let observation = probe_over(dir.path()).collect(&exports_context()).await;
-        assert_eq!(observation.status, ProbeStatus::Failed);
-        assert_eq!(observation.error_code.as_deref(), Some("no_exports"));
+        assert_eq!(observation.status, ProbeStatus::Ok);
+        assert_eq!(observation.payload["export_count"], 0);
     }
 
     #[tokio::test]
@@ -454,17 +463,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_server_exporting_nothing_is_a_failure() {
-        // Clients get permission errors rather than timeouts, so nothing else
-        // looks down. Worth reporting loudly.
+    async fn an_empty_export_list_is_recorded_as_a_fact_not_a_fault() {
+        // Whether exporting nothing is a fault depends on whether anything is
+        // listening on 2049, and only a rule sees both. The capability gating
+        // this probe is true of any host with the NFS packages installed, so
+        // failing here condemned every client that had them.
         let (_dir, path) = exports_file("# everything commented out\n");
         let observation = NfsExportsProbe::new()
             .with_exports_path(&path)
             .collect(&context(serde_json::Value::Null))
             .await;
 
-        assert_eq!(observation.status, ProbeStatus::Failed);
-        assert_eq!(observation.error_code.as_deref(), Some("no_exports"));
+        assert_eq!(observation.status, ProbeStatus::Ok);
+        assert_eq!(observation.payload["export_count"], 0);
+        assert!(observation.error_code.is_none(), "{:?}", observation.error_code);
     }
 
     #[tokio::test]

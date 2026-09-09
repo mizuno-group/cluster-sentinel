@@ -20,6 +20,35 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.21
+
+* **v0.3.20 が誤検知を出した**（バグ修正）。
+  実機の head node に
+  `CRITICAL parent is up but the port answers but nothing is exported`
+  が出た。parent は NFS を **export していない**（5 台からマウントする側）。
+
+  `storage.nfs.server` capability は
+  「`/etc/exports` が存在する、または `exportfs` が入っている」で判定される。
+  NFS クライアントとしてパッケージが入っていれば真になる。
+  そこへ v0.3.20 で export probe が走るようになり、
+  probe が「export ゼロ」を failure として報告したため、
+  **「NFS を提供できる」ホストが「NFS が壊れている」ホストとして報告された。**
+
+  * **probe は事実を述べ、ルールが判断する**という原則に戻した
+    （マウントの `ro` 判定で一度通した整理と同じ）。
+    export ゼロは `export_count: 0` という事実であって failure ではない。
+    ホストの storage 状態も汚さない。
+  * **export ゼロが障害になるのは 2049 で何かが listen している場合だけ。**
+    そのときクライアントは接続できて拒否される — このルールが
+    名指ししたい、あの分かりにくい障害。誰も listen していなければ、
+    そのホストは単に NFS サーバではない。
+  * export が消えた本物の fileserver（nfsd は生きている）は
+    従来どおり検知される。
+  * メッセージが `... is up but the port answers but nothing is exported` と
+    but が 2 回出て壊れていた。しかも「ポートが応答している」を
+    確認せずに主張していた。1 文として読めるように直し、
+    主張は実際の観測に合わせた。
+
 ## v0.3.20
 
 `nfs.server.exports` の観測が 1 件も無い、という調査から 3 件。

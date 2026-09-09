@@ -68,14 +68,28 @@ impl DiagnosisRule for StorageServiceFailure {
         let mut diagnoses = Vec::new();
 
         for host in context.entities_of_type(EntityType::Host) {
-            let port_failed = context
-                .observation(host.id, PROBE_SERVER_PORT)
-                .is_some_and(|o| o.status.is_bad());
-            let exports_failed = context
-                .observation(host.id, PROBE_SERVER_EXPORTS)
-                .is_some_and(|o| o.status.is_bad());
+            let port = context.observation(host.id, PROBE_SERVER_PORT);
+            let port_failed = port.is_some_and(|o| o.status.is_bad());
+            let port_answers = port.is_some_and(|o| !o.status.is_bad());
 
-            if !port_failed && !exports_failed {
+            // Exports being empty is a fact the probe records. Whether it is a
+            // fault depends on this: **is anything listening on 2049?**
+            //
+            // If something is, a client will connect and be refused, which is
+            // the confusing outage this rule exists to name. If nothing is,
+            // this host is simply not an NFS server -- and most hosts are not.
+            // The capability that gates the export probe is detected from
+            // `/etc/exports` existing or `exportfs` being installed, which is
+            // true of any machine with the NFS packages, clients included. A
+            // head node that mounts five shares and exports none of them was
+            // reported as a broken fileserver at critical.
+            let exports_empty = context
+                .observation(host.id, PROBE_SERVER_EXPORTS)
+                .and_then(|o| o.payload.get("export_count").and_then(|v| v.as_u64()))
+                .is_some_and(|count| count == 0);
+            let serving_nothing = exports_empty && port_answers;
+
+            if !port_failed && !serving_nothing {
                 continue;
             }
 
@@ -85,12 +99,12 @@ impl DiagnosisRule for StorageServiceFailure {
                 continue;
             }
 
-            let detail = if port_failed && exports_failed {
-                "the export port is not answering and nothing is exported"
+            let detail = if port_failed && exports_empty {
+                "its export port is not answering and it exports nothing"
             } else if port_failed {
-                "the export port is not answering"
+                "its export port is not answering"
             } else {
-                "the port answers but nothing is exported"
+                "its export port answers while it exports nothing, so clients are refused rather than timed out"
             };
 
             diagnoses.push(
@@ -465,6 +479,15 @@ mod tests {
             self
         }
 
+        /// What the export probe found, as it records it: a count, not a verdict.
+        fn exports(mut self, name: &str, count: u64) -> Self {
+            self.observations.insert(
+                Observation::new(ProbeId::new(PROBE_SERVER_EXPORTS), host_id(name), ProbeStatus::Ok)
+                    .with_payload(serde_json::json!({"export_count": count})),
+            );
+            self
+        }
+
         fn evaluate(&self, rule: &dyn DiagnosisRule) -> Vec<Diagnosis> {
             let context = DiagnosisContext {
                 environment: "lab",
@@ -508,18 +531,61 @@ mod tests {
     }
 
     #[test]
-    fn a_fileserver_exporting_nothing_is_diagnosed() {
+    fn a_fileserver_answering_on_2049_while_exporting_nothing_is_diagnosed() {
+        // The confusing outage this rule is for: the daemon is listening, so
+        // nothing looks down, and every client is refused rather than timed
+        // out.
         let world = two_domains()
             .host_is_up("fs-a")
-            .observe("fs-a", PROBE_SERVER_EXPORTS, ProbeStatus::Failed);
+            .observe("fs-a", PROBE_SERVER_PORT, ProbeStatus::Ok)
+            .exports("fs-a", 0);
 
         let diagnoses = world.evaluate(&StorageServiceFailure);
-        assert_eq!(diagnoses.len(), 1);
+        assert_eq!(diagnoses.len(), 1, "{diagnoses:#?}");
         assert!(
-            diagnoses[0].summary.contains("nothing is exported"),
+            diagnoses[0].summary.contains("exports nothing"),
             "{}",
             diagnoses[0].summary
         );
+    }
+
+    #[test]
+    fn a_host_that_simply_is_not_a_fileserver_is_not_diagnosed() {
+        // The capability gating the export probe is detected from
+        // `/etc/exports` existing or `exportfs` being installed, which is true
+        // of any host with the NFS packages -- every client included. Without
+        // something listening on 2049, "exports nothing" describes an ordinary
+        // compute node, and a head node mounting five shares and exporting
+        // none was reported as a broken fileserver at critical.
+        let world = two_domains().host_is_up("fs-a").exports("fs-a", 0);
+
+        assert!(
+            world.evaluate(&StorageServiceFailure).is_empty(),
+            "nothing is listening; this host does not serve NFS"
+        );
+    }
+
+    #[test]
+    fn a_fileserver_with_exports_is_not_diagnosed() {
+        let world = two_domains()
+            .host_is_up("fs-a")
+            .observe("fs-a", PROBE_SERVER_PORT, ProbeStatus::Ok)
+            .exports("fs-a", 3);
+
+        assert!(world.evaluate(&StorageServiceFailure).is_empty());
+    }
+
+    #[test]
+    fn the_summary_reads_as_one_sentence() {
+        // It read "parent is up but the port answers but nothing is exported".
+        let world = two_domains()
+            .host_is_up("fs-a")
+            .observe("fs-a", PROBE_SERVER_PORT, ProbeStatus::Ok)
+            .exports("fs-a", 0);
+        let summary = world.evaluate(&StorageServiceFailure)[0].summary.clone();
+
+        assert!(!summary.contains("but the port answers but"), "{summary}");
+        assert_eq!(summary.matches(" but ").count(), 1, "{summary}");
     }
 
     #[test]
