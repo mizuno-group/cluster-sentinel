@@ -17,6 +17,18 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.10 での修正
+
+**Slack への通知が 400 で弾かれていました。**
+
+Slack の incoming webhook は `text`（または `blocks` / `attachments`）を要求し、
+無ければ `missing_text_or_fallback_or_attachments` を返します。
+汎用 JSON をそのまま送っていたため、**Slack を宛先にしている場合、
+通知は 1 件も届いていません。**
+
+payload に `text`（Slack / Teams）と `content`（Discord）を追加しました。
+URL を書くだけで動きます。構造化フィールドはそのまま残っています。
+
 ## v0.3.9 での修正
 
 **incident が開いても通知されないことがありました。**

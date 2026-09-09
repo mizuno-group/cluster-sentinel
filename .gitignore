@@ -13,3 +13,6 @@ deploy/ansible/group_vars/*/vault.yml
 deploy/ansible/group_vars/*/vars.yml
 deploy/ansible/host_vars/
 deploy/ansible/inventory.ini
+
+# An unrelated repository that lives beside this one in the workspace.
+research-development-harness/

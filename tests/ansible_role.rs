@@ -46,9 +46,26 @@ fn the_role_states_a_minimum_it_can_work_with() {
 
     let default = setting(&defaults(), "sentinel_version").expect("sentinel_version is set");
     assert!(
-        default.trim_start_matches('v') >= minimum.as_str(),
+        version_parts(default.trim_start_matches('v')) >= version_parts(&minimum),
         "the default {default} is below the stated minimum {minimum}"
     );
+}
+
+/// A version as numbers, so 0.3.10 sorts after 0.3.2.
+///
+/// Comparing these as strings is wrong the moment a component reaches two
+/// digits, and it fails in the direction that blocks a release rather than
+/// letting a bad one through -- but it still fails.
+fn version_parts(version: &str) -> Vec<u32> {
+    version.split('.').map(|part| part.parse().unwrap_or(0)).collect()
+}
+
+#[test]
+fn versions_compare_as_numbers_not_text() {
+    // 0.3.10 is newer than 0.3.2, and a string comparison says otherwise.
+    assert!(version_parts("0.3.10") > version_parts("0.3.2"));
+    assert!(version_parts("0.4.0") > version_parts("0.3.99"));
+    assert_eq!(version_parts("1.2.3"), vec![1, 2, 3]);
 }
 
 #[test]
