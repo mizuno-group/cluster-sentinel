@@ -132,7 +132,11 @@ impl Controller {
             .partition(|o| known.contains(&o.target_entity));
 
         let outcome = self.store().ingest_observations(&accepted).await?;
-        let transitions = self.engine_mut().ingest_all(&accepted);
+        // Through the shared path, so an agent's export probe reaches the
+        // storage domains that host provides. `nfs.server.exports` is local
+        // only: this batch is the sole route it ever takes, and going straight
+        // to the engine here left every storage domain judged on nothing.
+        let transitions = self.ingest_into_engine(&accepted);
         for transition in &transitions {
             self.store().save_state_transition(transition).await?;
         }

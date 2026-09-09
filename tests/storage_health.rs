@@ -20,6 +20,7 @@ use sentinel::entity::{EntityId, EntityKey, EntityType};
 use sentinel::observation::{Observation, ProbeStatus};
 use sentinel::persistence::SqliteStore;
 use sentinel::probes::ProbeId;
+use sentinel::protocol::ObservationBatch;
 use sentinel::state::{Health, StateComponent};
 
 const SERVER_PORT: &str = sentinel::probes::nfs::PROBE_SERVER_PORT;
@@ -197,4 +198,75 @@ async fn a_provider_nothing_has_probed_leaves_its_domain_unknown() {
     // port has told us nothing, and "unknown" is the honest answer.
     let controller = served_cluster().await;
     assert_eq!(health_of_storage(&controller, "fs1").await, Health::Unknown);
+}
+
+#[tokio::test]
+async fn an_agents_own_export_probe_reaches_the_domain_it_serves() {
+    // `nfs.server.exports` reads /etc/exports, so it only ever runs on the
+    // fileserver itself and only ever arrives in that agent's batch. That
+    // route bypassed the derivation, which left the authoritative evidence out
+    // of it: on a real cluster the storage domain stayed UNKNOWN while its
+    // provider was reporting healthy exports every minute.
+    let mut controller = served_cluster().await;
+
+    let exports: Vec<Observation> = (0..4)
+        .map(|_| {
+            Observation::new(
+                ProbeId::new(sentinel::probes::nfs::PROBE_SERVER_EXPORTS),
+                host("fs1"),
+                ProbeStatus::Ok,
+            )
+        })
+        .collect();
+
+    controller
+        .ingest_agent_batch(&ObservationBatch {
+            protocol_version: sentinel::PROTOCOL_VERSION,
+            agent_id: uuid::Uuid::new_v4(),
+            session_id: uuid::Uuid::new_v4(),
+            observations: exports,
+        })
+        .await
+        .expect("agent batch");
+
+    assert_eq!(
+        health_of_storage(&controller, "fs1").await,
+        Health::Healthy,
+        "the provider says its exports are fine; the domain it serves is fine"
+    );
+}
+
+#[tokio::test]
+async fn an_agent_reporting_broken_exports_condemns_the_domain() {
+    let mut controller = served_cluster().await;
+    let batch = |status| ObservationBatch {
+        protocol_version: sentinel::PROTOCOL_VERSION,
+        agent_id: uuid::Uuid::new_v4(),
+        session_id: uuid::Uuid::new_v4(),
+        observations: (0..4)
+            .map(|_| {
+                Observation::new(
+                    ProbeId::new(sentinel::probes::nfs::PROBE_SERVER_EXPORTS),
+                    host("fs1"),
+                    status,
+                )
+            })
+            .collect(),
+    };
+
+    controller
+        .ingest_agent_batch(&batch(ProbeStatus::Ok))
+        .await
+        .expect("healthy");
+    assert_eq!(health_of_storage(&controller, "fs1").await, Health::Healthy);
+
+    controller
+        .ingest_agent_batch(&batch(ProbeStatus::Failed))
+        .await
+        .expect("failing");
+    assert_ne!(
+        health_of_storage(&controller, "fs1").await,
+        Health::Healthy,
+        "nothing is exported any more"
+    );
 }

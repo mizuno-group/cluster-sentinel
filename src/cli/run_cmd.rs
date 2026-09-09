@@ -591,14 +591,31 @@ pub async fn entity(cli: &Cli, command: &EntityCommand) -> anyhow::Result<i32> {
                 return Ok(1);
             };
 
-            let observations = store.recent_observations(target.id, *limit).await?;
-            let observations: Vec<_> = observations
-                .into_iter()
-                .filter(|o| probe.as_deref().is_none_or(|p| o.probe_id.as_str() == p))
-                .collect();
+            // Filtered in the query when a probe is named. Loading the last
+            // N and then filtering makes the limit apply to every probe at
+            // once, so a probe running once a minute is invisible beside one
+            // running every five seconds from three observers.
+            let observations = match probe.as_deref() {
+                Some(probe) => store.recent_observations_for_probe(target.id, probe, *limit).await?,
+                None => store.recent_observations(target.id, *limit).await?,
+            };
 
             if *json {
                 println!("{}", serde_json::to_string_pretty(&observations)?);
+            } else if observations.is_empty() {
+                // Which of the two it is matters: "this probe has never run"
+                // sends someone to look at capabilities, and "this entity is
+                // unmonitored" sends them somewhere else entirely.
+                match probe.as_deref() {
+                    Some(probe) => println!(
+                        "No {probe} observations recorded for {}.\n\n\
+                         Run `sentinel entity show {}` to see whether the capability that\n\
+                         gates this probe is in force, and `sentinel explain probes` for what\n\
+                         it would run.",
+                        target.canonical_name, target.canonical_name
+                    ),
+                    None => println!("No observations recorded for this entity yet."),
+                }
             } else {
                 print!("{}", render_observations(&inventory, &observations));
             }

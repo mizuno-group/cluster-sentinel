@@ -192,10 +192,7 @@ impl Controller {
         // observations, not the next one's.
         self.storage_providers = super::storage_providers(&inventory);
 
-        report.transitions = self.engine.ingest_all(&observations);
-        report
-            .transitions
-            .extend(self.engine.ingest_all(&self.storage_views(&observations)));
+        report.transitions = self.ingest_into_engine(&observations);
         for transition in &report.transitions {
             self.store().save_state_transition(transition).await?;
         }
@@ -358,13 +355,26 @@ impl Controller {
         views
     }
 
+    /// Feed observations to the state engine, storage domains included.
+    ///
+    /// The single place that does it. Observations reach the controller by
+    /// three routes -- its own probing, an agent's batch, and this method --
+    /// and the storage views have to be derived on all of them. The one that
+    /// matters most is the agent batch: `nfs.server.exports` is a local probe,
+    /// so an agent's report is the *only* way it ever arrives.
+    pub(super) fn ingest_into_engine(&mut self, observations: &[Observation]) -> Vec<StateTransition> {
+        let views = self.storage_views(observations);
+        let mut transitions = self.engine.ingest_all(observations);
+        transitions.extend(self.engine.ingest_all(&views));
+        transitions
+    }
+
     pub async fn ingest_observations(
         &mut self,
         observations: &[Observation],
     ) -> Result<Vec<StateTransition>, StoreError> {
         self.store().ingest_observations(observations).await?;
-        let mut transitions = self.engine.ingest_all(observations);
-        transitions.extend(self.engine.ingest_all(&self.storage_views(observations)));
+        let transitions = self.ingest_into_engine(observations);
         for transition in &transitions {
             self.store().save_state_transition(transition).await?;
         }

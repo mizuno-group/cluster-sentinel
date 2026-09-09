@@ -83,6 +83,36 @@ impl SqliteStore {
         rows.iter().map(decode_observation).collect()
     }
 
+    /// The most recent observations of one probe against one entity.
+    ///
+    /// Filtered in the query, not after it. Doing it afterwards means the
+    /// limit applies to *all* probes and the filter picks over the remainder,
+    /// so a probe that runs once a minute is invisible next to one that runs
+    /// every five seconds from three observers -- and the command reports that
+    /// nothing was recorded, which is a different and much more alarming
+    /// statement than the truth.
+    pub async fn recent_observations_for_probe(
+        &self,
+        entity: EntityId,
+        probe: &str,
+        limit: u32,
+    ) -> Result<Vec<Observation>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, probe_id, target_entity_id, observer_entity_id, agent_session_id, started_at,
+                    finished_at, duration_ms, status, payload, evidence, error_code, error_message
+             FROM observations
+             WHERE target_entity_id = ? AND probe_id = ?
+             ORDER BY finished_at DESC, id DESC LIMIT ?",
+        )
+        .bind(entity.to_string())
+        .bind(probe)
+        .bind(limit as i64)
+        .fetch_all(self.pool())
+        .await?;
+
+        rows.iter().map(decode_observation).collect()
+    }
+
     /// The newest observation of each probe, from each observer, for one
     /// entity.
     ///
@@ -392,6 +422,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn asking_for_one_probe_does_not_search_only_the_recent_ones() {
+        // `sentinel entity observations <host> --probe nfs.server.exports` said
+        // "No observations recorded for this entity yet" about a probe that had
+        // been running all along: the filter was applied to the last forty
+        // observations, and forty is under a minute on a host with three
+        // observers.
+        let (store, entity) = store_with_entity("node-a").await;
+
+        let mut observations = vec![Observation::new(
+            ProbeId::new("nfs.server.exports"),
+            entity,
+            ProbeStatus::Ok,
+        )];
+        for _ in 0..200 {
+            observations.push(Observation::new(ProbeId::new("network.tcp"), entity, ProbeStatus::Ok));
+        }
+        store.ingest_observations(&observations).await.expect("ingest");
+
+        let found = store
+            .recent_observations_for_probe(entity, "nfs.server.exports", 40)
+            .await
+            .expect("by probe");
+        assert_eq!(found.len(), 1, "the slow probe is there and must be findable");
+
+        let by_hand: Vec<_> = store
+            .recent_observations(entity, 40)
+            .await
+            .expect("recent")
+            .into_iter()
+            .filter(|o| o.probe_id.as_str() == "nfs.server.exports")
+            .collect();
+        assert!(by_hand.is_empty(), "filtering afterwards really does lose it");
+    }
+
+    #[tokio::test]
     async fn a_slow_probe_is_not_evicted_by_a_flood_of_fast_ones() {
         // The bug this query exists for. Reachability runs every five seconds
         // from every observer; the Slurm node view runs every five minutes. A
@@ -436,9 +501,15 @@ mod tests {
 
         let mut observations = Vec::new();
         for observer in &observers {
-            for status in [ProbeStatus::Failed, ProbeStatus::Ok] {
-                observations
-                    .push(Observation::new(ProbeId::new("network.tcp"), entity, status).with_observer(*observer));
+            for (age_s, status) in [(60, ProbeStatus::Failed), (0, ProbeStatus::Ok)] {
+                // Explicit times. Two observations built in the same
+                // microsecond carry the same finished_at, and the query then
+                // orders them by their random ids -- so this test decided
+                // whether it passed by coin toss, roughly once in four.
+                let mut observation =
+                    Observation::new(ProbeId::new("network.tcp"), entity, status).with_observer(*observer);
+                observation.finished_at = crate::time::now() - chrono::Duration::seconds(age_s);
+                observations.push(observation);
             }
         }
         store.ingest_observations(&observations).await.expect("ingest");
