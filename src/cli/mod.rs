@@ -3,6 +3,10 @@
 //! One binary, many subcommands (SPEC.md §40, IMPLEMENTATION.md §1). Anything
 //! not yet implemented says so rather than pretending to succeed.
 
+pub mod explain_cmd;
+
+/// Re-exported so tests can render the views without going through the CLI.
+pub use explain_cmd as explain;
 mod config_cmd;
 mod daemon_cmd;
 pub mod generate;
@@ -150,6 +154,14 @@ pub enum Command {
         /// Emit JSON instead of text.
         #[arg(long)]
         json: bool,
+    },
+    /// Explain how this cluster is watched: capabilities, probes and paths.
+    ///
+    /// For the person who did not build it. `status` says what Sentinel
+    /// concluded; this says how any of it is known.
+    Explain {
+        /// `capabilities`, `probes` or `paths`. All three when omitted.
+        topic: Option<String>,
     },
     /// Notification destinations.
     Notify {
@@ -326,6 +338,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<i32> {
             observations,
             json,
         } => run_cmd::prune(&cli, *dry_run, *vacuum, observations.as_deref(), *json).await,
+        Command::Explain { topic } => explain_cmd::run(&cli, topic.as_deref()).await,
         Command::Notify { command } => match command {
             NotifyCommand::Test { provider, severity } => {
                 notify_cmd::test(&cli, provider.as_deref(), severity.as_deref()).await

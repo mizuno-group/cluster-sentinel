@@ -5,6 +5,7 @@
 //! `role=fileserver` is deleted but `storage.nfs.server` is still present, NFS
 //! monitoring must keep working (SPEC.md §179).
 
+pub mod catalog;
 mod resolve;
 
 pub use resolve::{resolve_capabilities, CapabilityOverride, DiscoveryOutcome, Resolution, ResolutionReason};

@@ -20,6 +20,26 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.13
+
+* **`sentinel explain`**（新規）。この仕組みを**作っていない人**が読むためのもの。
+  `status` は「何を結論したか」を言うが、「それがどうやって分かるのか」は
+  どこにも出ていなかった。**根拠を確かめられない監視は、
+  信じるしかない監視であり、誰にも訂正できない。**
+  * `explain capabilities` — 各 capability の意味と、
+    **host に対して何を検査して判定しているか**（ファイルの有無、
+    `PATH` 上のプログラム、設定ファイルの記述）、
+    そしてどの probe を有効にするか。
+  * `explain probes` — 各 probe が**実際に実行するコマンド**または syscall、
+    必要な capability、どこが実行するか、間隔と timeout。
+    **cadence は設定を反映した値**で、停止中なら `[DISABLED]` と出る。
+  * `explain paths` — 監視経路。host ごとに、到達アドレス、
+    自分の agent が実行する probe、他所から実行される probe、観測者の一覧。
+  * `Either` の probe を「自分自身から」に混ぜない。
+    それは他所から実行されるものであり、agent が自分に応答を訊いても
+    「はい」以外を返しようがない。
+* `entity show` と `doctor` から `explain` への導線を追加。
+
 ## v0.3.12
 
 * **`[notification] min_interval`**（新規、既定 `1s`）。

@@ -107,6 +107,42 @@ sentinel doctor              # この host から見た自分自身
 sentinel prune --dry-run     # 保持期間を過ぎた記録の量
 ```
 
+### この仕組みを他人に説明する
+
+```bash
+sentinel explain                 # 3 つすべて
+sentinel explain capabilities    # 何が probe を有効にし、どう判定されるか
+sentinel explain probes          # 各 probe が実際に何を実行するか
+sentinel explain paths           # どの host を誰が、何で監視しているか
+```
+
+`status` は Sentinel が**何を結論したか**を言い、`explain` は
+**それがどうやって分かるのか**を言います。
+
+```
+systemd
+  meaning    systemd units can be inspected here
+  detected   the directory /run/systemd/system exists
+  enables    systemd.unit
+
+systemd.unit
+  runs       systemctl show <unit> --property=ActiveState,SubState,Result
+  needs      systemd
+  where      on the host itself, by its agent
+  cadence    every 10s, timeout 5s
+```
+
+```
+compute02
+  reached at   192.0.2.22
+  from itself  host.metrics, systemd.unit
+  from others  network.tcp, sentinel.agent, ssh.service
+  watched by   node03 (SameDomain), fs02 (Independent), node01 (Filler)
+```
+
+**`explain probes` の cadence は設定を反映した値**です。`[probes]` で
+変更していれば、その値が出ます。停止している probe は `[DISABLED]` と表示されます。
+
 ### 結論ではなく、生の観測を見る
 
 state や diagnosis が腑に落ちないときは、**何が観測されたのか**を直接見ます。

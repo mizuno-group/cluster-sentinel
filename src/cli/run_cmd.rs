@@ -8,7 +8,7 @@ use super::{status_cmd, Cli, DependencyCommand, EntityCommand, IncidentCommand};
 use crate::diagnosis::Diagnosis;
 
 /// Open the configured database, applying migrations.
-async fn open_store(config: &Config) -> anyhow::Result<SqliteStore> {
+pub(super) async fn open_store(config: &Config) -> anyhow::Result<SqliteStore> {
     Ok(SqliteStore::open(&config.database.path).await?)
 }
 

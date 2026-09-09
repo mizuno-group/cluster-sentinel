@@ -17,6 +17,35 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.13 での追加
+
+**`sentinel explain`** — この仕組みを作っていない人が読むためのコマンドです。
+
+```bash
+sentinel explain capabilities    # 何が probe を有効にし、どう判定されるか
+sentinel explain probes          # 各 probe が実際に何を実行するか
+sentinel explain paths           # どの host を誰が、何で監視しているか
+```
+
+`status` は「何を結論したか」を言いますが、「それがどうやって分かるのか」は
+これまでどこにも出ていませんでした。根拠を確かめられない監視は、
+信じるしかない監視であり、誰にも訂正できません。
+
+```
+systemd
+  detected   the directory /run/systemd/system exists
+  enables    systemd.unit
+
+systemd.unit
+  runs       systemctl show <unit> --property=ActiveState,SubState,Result
+  cadence    every 10s, timeout 5s
+
+compute02
+  from itself  host.metrics, systemd.unit
+  from others  network.tcp, sentinel.agent, ssh.service
+  watched by   node03 (SameDomain), fs02 (Independent), node01 (Filler)
+```
+
 ## v0.3.12 での追加
 
 **`[notification] min_interval`**（既定 `1s`）。同一宛先への送信間隔の下限です。

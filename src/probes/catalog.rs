@@ -15,6 +15,13 @@ pub struct CatalogEntry {
     pub definition: ProbeDefinition,
     /// What it measures, in one line.
     pub description: &'static str,
+    /// What it actually does on the machine.
+    ///
+    /// The command it runs or the syscall it makes, so that "how is this
+    /// being monitored" has an answer that does not require reading the
+    /// source. It is also what an operator needs in order to judge the cost
+    /// and the blast radius of changing its interval.
+    pub mechanism: &'static str,
     /// Anything an operator should know before changing its schedule.
     pub caution: Option<&'static str>,
 }
@@ -27,10 +34,16 @@ impl CatalogEntry {
 }
 
 /// Build one entry from a probe instance, so the schedule comes from the probe.
-fn entry(probe: Arc<dyn Probe>, description: &'static str, caution: Option<&'static str>) -> CatalogEntry {
+fn entry(
+    probe: Arc<dyn Probe>,
+    description: &'static str,
+    mechanism: &'static str,
+    caution: Option<&'static str>,
+) -> CatalogEntry {
     CatalogEntry {
         definition: probe.definition().clone(),
         description,
+        mechanism,
         caution,
     }
 }
@@ -44,38 +57,69 @@ pub fn catalog() -> Vec<CatalogEntry> {
         entry(
             Arc::new(network::TcpProbe::reachability()),
             "TCP 到達性。応答拒否も「パケットが返った」証拠として扱う",
+            "TCP connect() to the host's SSH port; a refusal counts as reached",
             Some("到達性診断の土台。長くすると host 障害の検出全体が遅くなる"),
         ),
         entry(
             Arc::new(sentinel_rpc::SentinelAgentProbe::new()),
             "agent の health endpoint。remote からのみ実行",
+            "HTTP GET /health on the agent port (7444)",
             Some("「agent だけ落ちた」と「host が落ちた」の区別に使う"),
         ),
-        entry(Arc::new(systemd::SystemdProbe::new()), "systemd unit の状態", None),
+        entry(
+            Arc::new(systemd::SystemdProbe::new()),
+            "systemd unit の状態",
+            "systemctl show <unit> --property=ActiveState,SubState,Result",
+            None,
+        ),
         entry(
             Arc::new(host::HostMetricsProbe::new()),
             "load / memory / filesystem / uptime",
+            "reads /proc/loadavg, /proc/meminfo, /proc/uptime and statvfs()",
             None,
         ),
-        entry(Arc::new(ssh::SshProbe::new()), "sshd の応答", None),
-        entry(Arc::new(gpu::NvidiaGpuProbe::new()), "GPU の枚数・温度・メモリ", None),
-        entry(Arc::new(nfs::NfsPortProbe::new()), "NFS server の port 応答", None),
+        entry(
+            Arc::new(ssh::SshProbe::new()),
+            "sshd の応答",
+            "SSH ポートへ TCP connect し、識別バナーを読む。認証はしない",
+            None,
+        ),
+        entry(
+            Arc::new(gpu::NvidiaGpuProbe::new()),
+            "GPU の枚数・温度・メモリ",
+            "nvidia-smi --query-gpu=... --format=csv",
+            None,
+        ),
+        entry(
+            Arc::new(nfs::NfsPortProbe::new()),
+            "NFS server の port 応答",
+            "NFS ポート (2049) へ TCP connect",
+            None,
+        ),
         entry(
             Arc::new(nfs::NfsMountProbe::new()),
             "mount の一覧と状態。/proc を読むだけで、hang 中でも安全",
+            "reads the host mount table (/proc/1/mounts); touches no filesystem",
             None,
         ),
         entry(
             Arc::new(nfs::NfsClientIoProbe::new()),
             "mount 先への実 I/O",
+            "stat() on the mount point, under a timeout",
             Some("同時実行は 1 に固定。blocking syscall を積み上げないため引き上げ不可"),
         ),
         entry(
             Arc::new(journal::JournalProbe::new()),
             "kernel / service event（OOM・I/O error・hung task 等）",
+            "journalctl --boot --priority=warning --since=-<n>s --lines=500",
             Some("同時実行は 1 に固定。引き上げ不可"),
         ),
-        entry(Arc::new(nfs::NfsExportsProbe::new()), "NFS server の export 一覧", None),
+        entry(
+            Arc::new(nfs::NfsExportsProbe::new()),
+            "NFS server の export 一覧",
+            "exportfs -v",
+            None,
+        ),
     ]
 }
 
@@ -134,6 +178,20 @@ mod tests {
             .expect("journal probe");
         let probe = super::super::journal::JournalProbe::new();
         assert_eq!(entry.definition, *probe.definition());
+    }
+
+    #[test]
+    fn every_probe_says_what_it_actually_runs() {
+        // "How is this being monitored" must have an answer that does not
+        // require reading the source, and it is also what an operator needs
+        // in order to judge the cost of changing an interval.
+        for entry in catalog() {
+            assert!(
+                !entry.mechanism.trim().is_empty(),
+                "{} does not say what it runs",
+                entry.id()
+            );
+        }
     }
 
     #[test]

@@ -267,6 +267,9 @@ pub fn render_entity(entity: &EntityStatus) -> String {
         }
     }
 
+    out.push_str(
+        "\nHow these are decided and what each probe runs:\n  sentinel explain capabilities\n  sentinel explain paths\n",
+    );
     out.push_str(&format!("\nLifecycle:\n{}\n", entity.lifecycle));
     out.push_str(&format!("\nID:\n{}\n", entity.id));
     out

@@ -321,7 +321,7 @@ pub async fn doctor(cli: &Cli, json: bool) -> anyhow::Result<i32> {
         println!("  ! {warning}");
     }
 
-    println!("\nCapabilities");
+    println!("\nCapabilities  (how each is decided: sentinel explain capabilities)");
     println!("{}", "\u{2500}".repeat(60));
     for (capability, reason) in &resolution.reasons {
         let mark = if reason.is_enabled() { "on " } else { "off" };
