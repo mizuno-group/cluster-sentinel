@@ -70,6 +70,50 @@ fn schedule_accelerator_probes(local: &mut LocalProbes, schedules: &ProbeSchedul
     );
 }
 
+/// Units a capability implies this host is running.
+///
+/// Capability, never role (SPEC.md §15): a host that has `slurm.compute`
+/// is running `slurmd` by definition of that capability, and one that merely
+/// has the package installed does not have the capability.
+///
+/// The unit name is the same everywhere these run; distributions that name
+/// them differently need `[[entities]]` and a static declaration, which is
+/// the escape hatch for exactly this.
+const SERVICE_UNITS: &[(&str, &str)] = &[
+    (crate::capability::well_known::SLURM_COMPUTE, "slurmd"),
+    (crate::capability::well_known::SLURM_CONTROLLER, "slurmctld"),
+];
+
+/// Schedule a unit probe for each service this host runs.
+///
+/// The observation is attributed to the **service** entity, not to the host.
+/// A service is its own entity precisely so that "the daemon died" and "the
+/// machine died" are different answers, and that distinction has nowhere to
+/// live if the only thing ever observed is the machine.
+///
+/// Without this, service entities exist in the inventory and nothing ever
+/// looks at them: a board where every service reads UNKNOWN for ever.
+fn schedule_service_probes(
+    local: &mut LocalProbes,
+    schedules: &ProbeSchedules,
+    environment: &str,
+    hostname: &str,
+    capabilities: &CapabilitySet,
+) {
+    for (capability, unit) in SERVICE_UNITS {
+        if !capabilities.has(capability) {
+            continue;
+        }
+        let service = EntityKey::new(environment, EntityType::Service, &format!("{unit}@{hostname}")).entity_id();
+        let mut probe = crate::probes::systemd::SystemdProbe::new();
+        if !schedules.is_enabled(probe.definition().id.as_str()) {
+            continue;
+        }
+        schedules.apply(probe.definition_mut());
+        local.add_for(Some(service), Arc::new(probe), serde_json::json!({ "unit": unit }));
+    }
+}
+
 /// Schedule continuous collection of kernel and service events.
 ///
 /// Continuous rather than on demand, because the moment the logs matter most
@@ -188,6 +232,13 @@ impl Agent {
         schedule_storage_probes(&mut local_probes, schedules, inspector.as_ref());
         schedule_accelerator_probes(&mut local_probes, schedules);
         schedule_journal_probes(&mut local_probes, schedules);
+        schedule_service_probes(
+            &mut local_probes,
+            schedules,
+            &config.environment,
+            &hostname,
+            &capabilities,
+        );
 
         Ok(Self {
             environment: config.environment.clone(),
@@ -292,6 +343,11 @@ impl Agent {
     }
 
     /// The local probes scheduled on this host.
+    /// The local probes, mutably, so a caller can run the ones that are due.
+    pub fn local_probes_mut(&mut self) -> &mut LocalProbes {
+        &mut self.local_probes
+    }
+
     pub fn local_probes(&self) -> &LocalProbes {
         &self.local_probes
     }

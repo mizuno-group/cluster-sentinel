@@ -17,6 +17,21 @@ sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
 sentinel version
 ```
 
+## v0.3.7 での修正
+
+**service entity を誰も観測していませんでした。**
+
+`slurmd@<node>` は inventory に存在するのに probe が 1 つも向いておらず、
+実クラスタで **31 entity 中 13 が永久に UNKNOWN** でした。
+
+unit の状態を systemd に訊くのはそのマシン上でしかできない問いなので、
+controller は肩代わりできません。そして agent は自分の host についての
+probe しかスケジュールしていませんでした。
+
+agent が、自分の capability が示す unit を監視するようにしました。
+**観測は service entity に帰属します**（host に混ぜると、
+「デーモンが死んだ」と「マシンが死んだ」の区別が消えるため）。
+
 ## v0.3.6 での修正
 
 **agent が自分の sandbox の mount table を読んでいました。**

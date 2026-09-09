@@ -20,6 +20,24 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.7
+
+* **service entity を誰も観測していなかった**（バグ修正）。
+  `slurmd@<node>` は inventory に存在するのに、probe が 1 つも向いておらず、
+  実クラスタで **31 entity 中 13 が永久に UNKNOWN** だった。
+  service を独立した entity にしているのは
+  「デーモンが死んだ」と「マシンが死んだ」を別の答えにするためであり、
+  service を誰も測らなければその区別は存在できない。
+  * unit を systemd に訊くのは local な問い（controller は肩代わりできない）。
+    agent が、自分の capability が示す unit を監視するようにした
+    （`slurm.compute` → `slurmd`、`slurm.controller` → `slurmctld`）。
+  * **観測は service に帰属させ、host には帰属させない。**
+    host に混ぜるとデーモンとマシンの区別が消える。
+  * capability による判定であり role では決めない。capability の判定には
+    設定とバイナリの両方が必要（`docs/adr/0003`）。
+  * systemd の無い host には**何もスケジュールしない**
+    （UNSUPPORTED を出し続けるより無いほうがよい）。
+
 ## v0.3.6
 
 * **agent が自分の sandbox の mount table を読んでいた**（バグ修正）。

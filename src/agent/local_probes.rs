@@ -27,6 +27,14 @@ struct Scheduled {
     probe: Arc<dyn Probe>,
     parameters: serde_json::Value,
     next_due: Instant,
+    /// What this probe measures, when that is not the host itself.
+    ///
+    /// A service running on this host is its own entity, and an observation
+    /// about `slurmd@node01` must be attributed to `slurmd@node01` rather than
+    /// to the machine it happens to run on -- otherwise the distinction
+    /// between a failed daemon and a failed host, which is the whole point,
+    /// has nowhere to live.
+    target: Option<EntityId>,
 }
 
 /// Runs the agent's local probes on their own schedules.
@@ -70,6 +78,7 @@ impl LocalProbes {
                 probe,
                 parameters: serde_json::Value::Null,
                 next_due: now + jitter,
+                target: None,
             });
         }
         agent
@@ -84,6 +93,18 @@ impl LocalProbes {
     /// Returns whether the probe was scheduled; a probe this host lacks the
     /// capability for is refused.
     pub fn add(&mut self, probe: Arc<dyn Probe>, parameters: serde_json::Value) -> bool {
+        self.add_for(None, probe, parameters)
+    }
+
+    /// Schedule a probe that measures something other than this host.
+    ///
+    /// `target` is the entity the observation is about. The capability gate is
+    /// unchanged and still asks about **this host**, because it is this host
+    /// that has to run the probe: watching `slurmd@node01` needs systemd on
+    /// node01, whatever the observation is attributed to. Skipping the gate
+    /// here would schedule `systemctl` on hosts that have no systemd and
+    /// report UNSUPPORTED for ever.
+    pub fn add_for(&mut self, target: Option<EntityId>, probe: Arc<dyn Probe>, parameters: serde_json::Value) -> bool {
         if !self.applies(probe.as_ref()) {
             return false;
         }
@@ -92,6 +113,7 @@ impl LocalProbes {
             probe,
             parameters,
             next_due: Instant::now() + jitter,
+            target,
         });
         true
     }
@@ -165,7 +187,8 @@ impl LocalProbes {
                 serde_json::Value::Null => self.parameters.clone(),
                 specific => specific.clone(),
             };
-            let context = ProbeContext::local(self.entity, self.capabilities.clone())
+            let target = self.scheduled[index].target.unwrap_or(self.entity);
+            let context = ProbeContext::local(target, self.capabilities.clone())
                 .with_parameters(parameters)
                 .with_timeout(definition.timeout);
 
