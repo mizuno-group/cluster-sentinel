@@ -24,12 +24,35 @@ pub struct CatalogEntry {
     pub mechanism: &'static str,
     /// Anything an operator should know before changing its schedule.
     pub caution: Option<&'static str>,
+    /// The entity types this probe's observations are actually attributed to.
+    ///
+    /// `definition.target_entity_types` says what the probe is *able* to
+    /// measure; this says what it is *wired* to measure. They usually agree,
+    /// and where they do not the difference matters: `systemd.unit` can target
+    /// a host, but the agent schedules one per service and attributes each
+    /// observation to that service. Auditing it against hosts therefore
+    /// reported every host in the cluster as having a silent probe, which is
+    /// how a report earns being ignored.
+    ///
+    /// `None` means "the same as the definition".
+    pub reports_on: Option<&'static [crate::entity::EntityType]>,
 }
 
 impl CatalogEntry {
     /// The probe id.
     pub fn id(&self) -> &str {
         self.definition.id.as_str()
+    }
+
+    /// Whether an observation from this probe would name an entity of this type.
+    pub fn reports_on_type(&self, entity_type: crate::entity::EntityType) -> bool {
+        match self.reports_on {
+            Some(types) => types.contains(&entity_type),
+            None => {
+                self.definition.target_entity_types.is_empty()
+                    || self.definition.target_entity_types.contains(&entity_type)
+            }
+        }
     }
 }
 
@@ -45,7 +68,15 @@ fn entry(
         description,
         mechanism,
         caution,
+        reports_on: None,
     }
+}
+
+/// Builder: state what this probe's observations actually name, when that is
+/// narrower than what it could measure.
+fn reporting_on(mut entry: CatalogEntry, types: &'static [crate::entity::EntityType]) -> CatalogEntry {
+    entry.reports_on = Some(types);
+    entry
 }
 
 /// Every probe, in the order an operator is likely to think about them:
@@ -66,11 +97,17 @@ pub fn catalog() -> Vec<CatalogEntry> {
             "HTTP GET /health on the agent port (7444)",
             Some("「agent だけ落ちた」と「host が落ちた」の区別に使う"),
         ),
-        entry(
-            Arc::new(systemd::SystemdProbe::new()),
-            "systemd unit の状態",
-            "systemctl show <unit> --property=ActiveState,SubState,Result",
-            None,
+        // Scheduled once per service entity by the agent, with the unit name
+        // as a parameter, and each observation names that service rather than
+        // the host it runs on.
+        reporting_on(
+            entry(
+                Arc::new(systemd::SystemdProbe::new()),
+                "systemd unit の状態",
+                "systemctl show <unit> --property=ActiveState,SubState,Result",
+                None,
+            ),
+            &[crate::entity::EntityType::Service],
         ),
         entry(
             Arc::new(host::HostMetricsProbe::new()),

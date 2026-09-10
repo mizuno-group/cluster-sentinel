@@ -60,6 +60,20 @@ impl PeerProbes {
             schedules,
             crate::probes::sentinel_rpc::SentinelAgentProbe::new(),
         );
+        // The export port, from a peer rather than only from the controller.
+        //
+        // The controller ran this one alone, and it declines to probe its own
+        // host -- rightly, for reachability: a host reporting that it answers
+        // has established nothing. But that exclusion is total, so nothing
+        // checked the NFS port on the controller's own machine, and the probe
+        // audit found exactly that on a real cluster.
+        //
+        // A peer checking another host's 2049 is also better evidence than the
+        // controller doing it alone: it is the same independent-viewpoint
+        // argument the rest of peer monitoring rests on. Gated on the target's
+        // capabilities like every probe here, so it runs only against hosts
+        // that actually serve.
+        add(&mut probes, schedules, crate::probes::nfs::NfsPortProbe::new());
 
         Self {
             runner: ProbeRunner::new(),
@@ -247,6 +261,51 @@ mod tests {
         assert!(
             !probes.contains(&crate::probes::sentinel_rpc::PROBE_ID.to_string()),
             "the target has no agent capability"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_peer_checks_a_fileservers_export_port() {
+        // Found by the probe audit on a real cluster: nothing was checking the
+        // NFS port on the controller's own host, because the controller was
+        // the only thing that ran that probe and it declines to probe itself.
+        // A peer is both the fix and the better evidence -- the same
+        // independent-viewpoint argument the rest of peer monitoring rests on.
+        let target = dead_target("fs1", &["storage.nfs.server"]).await;
+        let mut peers = PeerProbes::new(host("observer"));
+        peers.set_targets(1, vec![target]);
+
+        let observations = peers.observe_all().await;
+        assert!(
+            observations
+                .iter()
+                .any(|o| o.probe_id.as_str() == crate::probes::nfs::PROBE_SERVER_PORT),
+            "{:?}",
+            observations
+                .iter()
+                .map(|o| o.probe_id.as_str().to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_host_that_serves_no_storage_is_not_asked_about_its_export_port() {
+        // Gated on the target's capabilities like everything else here, so
+        // adding it does not start knocking on 2049 across the whole cluster.
+        let target = dead_target("node01", &["ssh.server"]).await;
+        let mut peers = PeerProbes::new(host("observer"));
+        peers.set_targets(1, vec![target]);
+
+        let observations = peers.observe_all().await;
+        assert!(
+            !observations
+                .iter()
+                .any(|o| o.probe_id.as_str() == crate::probes::nfs::PROBE_SERVER_PORT),
+            "{:?}",
+            observations
+                .iter()
+                .map(|o| o.probe_id.as_str().to_string())
+                .collect::<Vec<_>>()
         );
     }
 

@@ -20,6 +20,43 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v0.3.23
+
+`sentinel audit` を実クラスタ（16 host）で初めて走らせた結果の 3 件。
+2 件は audit 自身の問題、1 件は audit が正しく見つけた本物の穴。
+
+* **`probe_last_seen` が 6.9 秒かかっていた**（性能バグ）。
+  `status` は毎回このクエリを走らせるため、
+  **いちばんよく使うコマンドに 7 秒を足していた。**
+  `(target, probe)` でグループ化しているのに、既存の index は
+  `(target, finished_at)` と `(probe, finished_at)` で、
+  **どちらも使えず 2 週間分の観測を全走査していた。**
+  * グループ化に一致する index を追加。
+  * JOIN を `IN` に変更（JOIN だと SQLite が GROUP BY 用の
+    一時 B-tree を作るが、`IN` なら index を歩くだけで済む）。
+  * 120 万件で実測: **3.06s → 0.64s（index）→ 0.14s（+ IN）。**
+
+* **`systemd.unit` を全 host に対して「沈黙している」と報告していた**
+  （audit の誤検知）。この probe は host も targeting に含むが、
+  agent は **service entity ごとに**スケジュールし、
+  観測は service に紐づく。host に聞けば当然「一度も無い」になる。
+  **16 件中 16 件が誤検知の報告は、報告として死んでいる。**
+  * catalog に「何を測れるか」と「何を測るよう配線されているか」を
+    分けるフィールドを追加し、audit は後者を見る。
+    この 2 つの距離こそ `nfs.server.exports` を隠していたもの。
+
+* **controller 自身のホストの NFS ポートを誰も見ていなかった**
+  （audit が見つけた本物の穴）。
+  `nfs.server.port` は controller しか実行せず、controller は
+  **自分自身のホストには一切 probe を打たない**
+  （到達性については正当な除外だが、それが全 probe に及んでいた）。
+  * peer agent も `nfs.server.port` を実行するようにした。
+    対象の capability で gate されるので、実際に export している
+    host にしか飛ばない。
+  * これは穴を塞ぐだけでなく**証拠としても強い** — peer が互いの 2049 を
+    見るのは、peer monitoring 全体が依拠している
+    「独立した視点」の議論そのもの。
+
 ## v0.3.22
 
 * **`sentinel audit`（新規）— 動いているはずの検査が動いているか。**

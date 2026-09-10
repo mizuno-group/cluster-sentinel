@@ -131,6 +131,14 @@ pub fn silent_probes(
             if !config.probes.is_enabled(&probe) {
                 continue;
             }
+            // `reports_on_type` rather than the definition's targeting: the
+            // question is what an observation from this probe would name, not
+            // what the probe could in principle measure. `systemd.unit` can
+            // target a host and is scheduled per service, and auditing it
+            // against hosts reported every host in the cluster.
+            if !entry.reports_on_type(entity.entity_type) {
+                continue;
+            }
             if !definition.applies_to(entity.entity_type, &entity.capabilities) {
                 continue;
             }
@@ -385,6 +393,23 @@ mod tests {
         let findings = findings_for(&inventory, &BTreeMap::new());
         assert!(
             !findings.iter().any(|f| f.probe == PROBE_SERVER_EXPORTS),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn a_probe_scheduled_per_service_is_not_audited_against_hosts() {
+        // `systemd.unit` can target a host and is scheduled once per service,
+        // with each observation naming that service. Auditing it against hosts
+        // reported all sixteen hosts of a real cluster as having a silent
+        // probe -- and a report that is mostly wrong is a report nobody reads.
+        let with_systemd = ManagedEntity::new(ENV, EntityType::Host, "node01")
+            .with_capabilities(["sentinel.agent", "systemd"].into_iter().collect::<CapabilitySet>());
+        let inventory = inventory_with(vec![with_systemd]);
+
+        let findings = findings_for(&inventory, &BTreeMap::new());
+        assert!(
+            !findings.iter().any(|f| f.probe == crate::probes::systemd::PROBE_ID),
             "{findings:#?}"
         );
     }
