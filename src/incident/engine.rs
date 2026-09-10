@@ -94,6 +94,13 @@ fn base_severity(diagnosis: &Diagnosis) -> Severity {
         // broken and nobody needs waking.
         kind::RESOURCE_CONFIGURATION_MISMATCH | kind::GPU_CONFIGURATION_MISMATCH | kind::CLOCK_SKEW => Severity::Info,
         // A node the scheduler will not use is a degradation, not an outage.
+        //
+        // Note that this is the severity **before** fan-out, and every compute
+        // node has a `slurmd` service hosted on it, so in a real graph these
+        // are raised to `Warning` by the rule below and do reach a webhook at
+        // the default floor. That is deliberate: an operator who drains a node
+        // wants to see it happen. Pinned by
+        // `a_drained_node_reaches_the_default_notification_floor`.
         kind::SLURM_ONLY_DEGRADATION | kind::HOST_REBOOTED => Severity::Info,
         _ => Severity::Warning,
     }
@@ -461,6 +468,32 @@ mod tests {
         // A drained node is information, not an emergency.
         let drained = diagnosis(kind::SLURM_ONLY_DEGRADATION, "a", &["a"]);
         assert_eq!(severity_for(&drained, &DependencyGraph::new()), Severity::Info);
+    }
+
+    #[test]
+    fn a_drained_node_reaches_the_default_notification_floor() {
+        // The test above uses an empty graph, which is not the shape any real
+        // cluster has: every compute node has a `slurmd` service hosted on it,
+        // so its fan-out is never zero and the base `Info` is raised to
+        // `Warning`. That places it at the default `min_severity`, so draining
+        // a node notifies.
+        //
+        // Kept deliberately. It was found by asking whether draining a node is
+        // a safe way to test the pipeline, and the answer is that it is -- it
+        // exercises the whole chain through to the recovery notification.
+        // Operators who want quiet drains raise `min_severity` to `critical`.
+        let node = host("a");
+        let service = EntityKey::new("lab", EntityType::Service, "slurmd@a").entity_id();
+        let graph = DependencyGraph::from_edges([DependencyEdge::new(service, node, DependencyType::HostedOn)]);
+
+        assert_eq!(
+            graph.downstream(node, None).len(),
+            1,
+            "the service depends on the host, so the blast radius is never zero"
+        );
+
+        let drained = diagnosis(kind::SLURM_ONLY_DEGRADATION, "a", &["a"]);
+        assert_eq!(severity_for(&drained, &graph), Severity::Warning);
     }
 
     #[test]

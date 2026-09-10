@@ -12,7 +12,7 @@ use crate::entity::EntityId;
 use crate::observation::{Observation, ObservationId, ProbeStatus};
 use crate::probes::ProbeId;
 use crate::state::{Classification, ComponentState, EntityState, Health, StateComponent, StateTransition};
-use crate::time::{now, parse_rfc3339, to_rfc3339};
+use crate::time::{now, parse_rfc3339, to_rfc3339, Timestamp};
 
 use super::{SqliteStore, StoreError};
 
@@ -81,6 +81,46 @@ impl SqliteStore {
         .await?;
 
         rows.iter().map(decode_observation).collect()
+    }
+
+    /// When each probe was last seen reporting about each entity.
+    ///
+    /// One aggregate rather than a query per entity, because the caller wants
+    /// the whole environment at once: the question it answers is "is anything
+    /// that should be running not running", and that cannot be asked one
+    /// entity at a time without becoming too slow to run often. A check nobody
+    /// runs is the same as no check.
+    pub async fn probe_last_seen(
+        &self,
+        environment: &str,
+    ) -> Result<BTreeMap<(EntityId, String), Timestamp>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT o.target_entity_id AS entity, o.probe_id AS probe, MAX(o.finished_at) AS seen
+             FROM observations o
+             JOIN entities e ON e.id = o.target_entity_id
+             WHERE e.environment = ?
+             GROUP BY o.target_entity_id, o.probe_id",
+        )
+        .bind(environment)
+        .fetch_all(self.pool())
+        .await?;
+
+        let mut seen = BTreeMap::new();
+        for row in rows {
+            let entity: String = row.try_get("entity")?;
+            let probe: String = row.try_get("probe")?;
+            let at: String = row.try_get("seen")?;
+            let Ok(entity) = entity.parse::<EntityId>() else {
+                continue;
+            };
+            let at = parse_rfc3339(&at).map_err(|e| StoreError::Decode {
+                kind: "timestamp",
+                detail: format!("{at}: {e}"),
+            })?;
+            seen.insert((entity, probe), at);
+        }
+
+        Ok(seen)
     }
 
     /// The most recent observations of one probe against one entity.

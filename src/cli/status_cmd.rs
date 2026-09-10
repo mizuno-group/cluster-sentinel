@@ -83,6 +83,15 @@ pub struct StatusReport {
     /// Incidents that are still open.
     #[serde(default)]
     pub incidents: Vec<IncidentSummary>,
+    /// One line about probes that should be reporting and are not.
+    ///
+    /// Carried here because the failure it describes is invisible everywhere
+    /// else: a probe that never runs produces no observation, so nothing fails
+    /// and nothing is diagnosed. `sentinel audit` says which ones -- but a
+    /// check nobody thinks to run is the same as no check, and nobody thought
+    /// to look for the probe that had never run.
+    #[serde(default)]
+    pub silent_probes: Option<String>,
     /// Count per health value.
     pub totals: BTreeMap<String, usize>,
 }
@@ -113,8 +122,15 @@ impl StatusReport {
             environment: environment.to_string(),
             entities,
             incidents: Vec::new(),
+            silent_probes: None,
             totals,
         }
+    }
+
+    /// Builder: attach the one-line probe audit summary.
+    pub fn with_silent_probes(mut self, summary: Option<String>) -> Self {
+        self.silent_probes = summary;
+        self
     }
 
     /// Builder: attach the incidents that are still open.
@@ -216,10 +232,41 @@ fn type_order(entity_type: &str) -> u8 {
 
 /// Load the current picture from the database.
 pub async fn load_report(store: &SqliteStore, environment: &str) -> anyhow::Result<StatusReport> {
+    load_report_with(store, environment, None).await
+}
+
+/// Build the report, auditing probe silence when a configuration is available.
+///
+/// The audit needs the configuration -- a probe switched off on purpose is not
+/// silent -- so callers that have one pass it and callers that do not still get
+/// a report.
+pub async fn load_report_with(
+    store: &SqliteStore,
+    environment: &str,
+    config: Option<&crate::config::Config>,
+) -> anyhow::Result<StatusReport> {
     let inventory = store.load_inventory(environment).await?;
     let states = store.load_entity_states(environment).await?;
     let incidents = store.load_active_incidents(environment).await?;
-    Ok(StatusReport::build(environment, &inventory, &states).with_incidents(&incidents, &inventory))
+
+    let silent = match config {
+        Some(config) => {
+            let last_seen = store.probe_last_seen(environment).await?;
+            let observed = crate::audit::observed_entities(&inventory, config);
+            crate::audit::summary(&crate::audit::silent_probes(
+                &inventory,
+                config,
+                &observed,
+                &last_seen,
+                crate::time::now(),
+            ))
+        }
+        None => None,
+    };
+
+    Ok(StatusReport::build(environment, &inventory, &states)
+        .with_incidents(&incidents, &inventory)
+        .with_silent_probes(silent))
 }
 
 /// Render a status report as text.
@@ -285,6 +332,14 @@ pub fn render(report: &StatusReport) -> String {
         .map(|(health, count)| format!("{count} {health}"))
         .collect();
     out.push_str(&format!("{}\n", summary.join(", ")));
+
+    // Last line, and only when there is something to say. All-green looks
+    // identical whether the cluster is healthy or nothing is watching it, and
+    // this is the one line that tells those apart without being asked.
+    if let Some(silence) = &report.silent_probes {
+        out.push_str(&format!("\n⚠ {silence}\n"));
+    }
+
     out
 }
 

@@ -1,6 +1,12 @@
 # 実クラスタ導入マニュアル
 
 実際の計算クラスタへ Cluster Sentinel を導入する手順書です。
+**網羅性を優先しているので長くなっています。**
+
+> **はじめて触る場合は [GETTING_STARTED.md](GETTING_STARTED.md) から
+> 読んでください。** 30 分で動くところまで行けます。
+> この文書は、そのあと本番構成へ広げるときに読むものです
+> （TLS、非標準ポート、複数 NIC、段階的導入など）。
 
 **Rust ツールチェインは不要です。** 配布物は静的リンクされた単一バイナリで、
 [Releases](https://github.com/Lzh-Function/cluster-sentinel/releases) から
@@ -31,6 +37,8 @@ reboot・`systemctl restart`・mount 操作・`scontrol update` を実行しま�
 | 8 | [SSH ポートが 22 でない場合](#8-ssh-ポートが-22-でない場合) | 該当する場合 |
 | 9 | [その他の非標準構成](#9-その他の非標準構成) | 該当する場合 |
 | 9.7 | [NIC が複数ある場合](#97-nic-が複数ある場合vlanbridge複数-fabric) | **VLAN 環境は必読** |
+| 9.9 | [ストレージ構成は書かなくてよい](#99-ストレージ構成は書かなくてよい例外は-3-つ) | NFS を使う場合 |
+| 9.10 | [controller に agent を同居させる](#910-controller-に-agent-を同居させる) | 推奨 |
 | 10 | [導入後の確認](#10-導入後の確認) | — |
 | 11 | [設定ファイルテンプレート](#11-設定ファイルテンプレート) | 参考 |
 | 12 | [チェックリスト](#12-チェックリスト) | — |
@@ -84,7 +92,9 @@ grep -E "^(SlurmctldHost|ControlMachine|NodeName)" /etc/slurm/slurm.conf
 # SSH のポート（22 以外なら §8 を参照）
 grep -iE "^\s*(Port|ListenAddress)" /etc/ssh/sshd_config
 
-# Slurm の外にある host（fileserver 等）の一覧と、その storage 構成
+# Slurm の外にある host（fileserver 等）の一覧
+#   NFS のマウント関係は agent の報告から自動で導出されるため、
+#   調べておく必要はない（§9.9）
 ```
 
 ---
@@ -149,11 +159,16 @@ sentinel version
 ```
 
 ```
-sentinel 0.3.0
+sentinel 0.3.21
 protocol version: 1
 config version:   1
 target:           x86_64-unknown-linux-musl
 ```
+
+> 初回はこれで構いませんが、**すでに Sentinel が動いているホストを
+> 更新するときは `install` ではなく `mv` を使ってください。**
+> 実行中のバイナリは truncate できず `Text file busy` になります
+> （[OPERATIONS.md のアップグレード](OPERATIONS.md#アップグレード)）。
 
 **必ず `/usr/local/bin` に置いてから次に進んでください。**
 ダウンロードしたディレクトリのまま `sentinel install` を実行すると、
@@ -965,6 +980,136 @@ interval     = "15m"
 `sentinel prune --dry-run` で、実行前に削除量を確認できます。
 運用手順は [OPERATIONS.md](OPERATIONS.md) を参照してください。
 
+### 9.9 ストレージ構成は書かなくてよい（例外は 3 つ）
+
+**NFS の依存関係を設定ファイルに書く必要はありません。**
+
+agent は毎サイクル自分のマウント表を報告しています。controller はそこから
+fileserver の host entity、storage entity、`provides`、`uses_storage` を
+すべて組み立てます。ノードを増やしても、マウント先を変えても、
+設定ファイルは触りません。
+
+```bash
+sentinel discover && sentinel dependency list
+```
+
+止めたい場合は `[discovery.nfs] enabled = false` です。
+
+#### 手で書く必要がある 3 つの場合
+
+**1. マウントが IP で書かれていて、その IP を持つ host を Sentinel が知らない**
+
+`10.0.0.9:/data` のようなマウントは、その address を登録している host が
+いれば自動で結び付きます。いなければ **entity は作られません**。
+address は identity ではないため（[ADR 0001](adr/0001-deterministic-entity-identity.md)）、
+`10.0.0.9` という名前の entity を捏造すると、そのマシンが後から自分の名前で
+登録したときに**同じマシンに 2 つの identity ができて**しまうからです。
+
+黙って落とすことはせず、`sentinel discover` が報告します。
+
+```
+NFS mounts that could not be tied to a known host:
+  10.0.0.9  mounted by node01, node02
+```
+
+その host を宣言すれば、以降は自動で解決されます。
+
+```toml
+[[entities]]
+type = "host"
+name = "the-fileserver"
+addresses = ["10.0.0.9"]
+```
+
+**2. NFS 以外の共有ストレージ**
+
+Lustre、GPFS、オブジェクトストレージなど。導出は NFS のマウント表を
+見ているだけなので、それ以外は従来どおり宣言します。
+
+```toml
+[[entities]]
+type = "storage"
+name = "lustre-scratch"
+
+[[dependencies]]
+from = "storage/lustre-scratch"
+to   = "host/mds01"
+type = "provides"
+
+[[dependencies]]
+from = "host/node01"
+to   = "storage/lustre-scratch"
+type = "uses_storage"
+```
+
+**3. どのノードもマウントしていないが監視したい fileserver**
+
+誰もマウントしていなければマウント表に現れないため、導出されません。
+
+手で書いた宣言は導出結果と**併存**します。打ち消し合いません。
+
+#### storage entity の健全性はどこから来るか
+
+storage entity には probe を打つ相手がいません（それは「概念」であって
+マシンではないため）。健全性は**提供元ホストの export 検査**から導かれます。
+
+ここで使うのは **server 側の検査だけ**です。1 台のホストが fileserver でも
+NFS クライアントでもありうるので（scratch を export しつつ他所の home を
+マウントする計算ノード）、両者を混ぜると**クライアント側のマウント詰まりが
+「このホストの export が壊れた」として報告され**、人を間違ったマシンに
+送ることになります。
+
+### 9.10 controller に agent を同居させる
+
+**推奨します。** controller のホスト（多くはヘッドノード）に agent を
+入れていないと、そのホストは**外から到達性を見られるだけ**になります。
+CPU もメモリも NFS マウントも journal も見えません。
+`slurmctld` が乗っている、いちばん落ちてほしくないマシンが
+いちばん手薄になります。
+
+同居させるときは **設定ファイルのパスを分けます**。既定のままだと
+agent の install が controller の `config.toml` を上書きします。
+
+```bash
+sudo sentinel install agent --config /etc/sentinel/agent.toml
+```
+
+これで衝突しません。
+
+| | controller | agent |
+| --- | --- | --- |
+| 設定 | `/etc/sentinel/config.toml` | `/etc/sentinel/agent.toml` |
+| unit | `sentinel-controller.service` | `sentinel-agent.service` |
+| ポート | 7443 | 7444 |
+| 状態ファイル | `sentinel.db` | `spool.db` |
+| credential | `/etc/sentinel/token`（**共用**） | 同左 |
+
+credential は設定ファイルの隣を見に行くので、同じディレクトリに置く限り
+自動的に共用されます。**agent の install が credential を作ったり
+入れ替えたりすることはありません。**
+
+書き換えるのは 2 行です。
+
+```bash
+sudo sed -i 's/^environment = .*/environment = "my-cluster"/; s/^controller_address = .*/controller_address = "127.0.0.1:7443"/' /etc/sentinel/agent.toml
+```
+
+```bash
+sudo systemctl daemon-reload && sudo systemctl enable --now sentinel-agent
+```
+
+同居させると、そのホストについて次が自動的に解決します。
+
+- SSH ポートが 22 以外でも、agent が `sshd_config` から読んで報告する
+  （§8 の手作業が不要になる）
+- そのホストの NFS マウントが依存グラフに入る（§9.9）
+- CPU・メモリ・journal・systemd サービスが見えるようになる
+
+> **Ansible の `agents` グループには入れないでください。**
+> ロールは `/etc/sentinel/config.toml` に書き込むため、
+> **controller の設定が上書きされて controller が止まります。**
+> このホストだけは上の手順で個別に入れてください。
+
 ---
 
 ## 10. 導入後の確認
@@ -1090,54 +1235,19 @@ capabilities = ["storage.nfs.server", "observer.peer"]
 labels = { role = "fileserver", rack = "r01" }
 
 # ---------------------------------------------------------------------------
-# Storage entity
+# Storage entity と依存関係
 #
-# fileserver そのものとは別の概念として扱う。
-# 「fileserver は生きているが export service だけ落ちた」を表現するために必要。
-# ---------------------------------------------------------------------------
-[[entities]]
-type = "storage"
-name = "filesrv01-storage"
-
-[[entities]]
-type = "storage"
-name = "filesrv02-storage"
-
-# ---------------------------------------------------------------------------
-# 依存関係
+# **NFS については、書く必要がありません。**
+# agent が報告するマウント表から、fileserver の host entity、storage entity、
+# provides、uses_storage がすべて自動で導出される。
+# ノードがマウント先を変えても、この設定ファイルを触る必要はない。
 #
-# ここを書かないと、複数 node の storage 障害が
-# SHARED_STORAGE_FAILURE（原因 = fileserver）ではなく
-# 個別の NFS_CLIENT_FAILURE として報告される。
+#   確認:  sentinel dependency list
+#   停止:  [discovery.nfs] enabled = false
 #
-# from が to に依存する。
+# 手で書く必要があるのは §9.9 に挙げた 3 つの例外だけ。
+# 手で書いたものは導出結果と併存する（打ち消し合わない）。
 # ---------------------------------------------------------------------------
-[[dependencies]]
-from = "storage/filesrv01-storage"
-to   = "host/filesrv01"
-type = "provides"
-
-[[dependencies]]
-from = "storage/filesrv02-storage"
-to   = "host/filesrv02"
-type = "provides"
-
-# filesrv01 を使う node
-[[dependencies]]
-from = "host/node02"
-to   = "storage/filesrv01-storage"
-type = "uses_storage"
-
-[[dependencies]]
-from = "host/node03"
-to   = "storage/filesrv01-storage"
-type = "uses_storage"
-
-# filesrv02 を使う node
-[[dependencies]]
-from = "host/node05"
-to   = "storage/filesrv02-storage"
-type = "uses_storage"
 
 # ---------------------------------------------------------------------------
 # capability の上書き（必要な場合のみ）

@@ -3,6 +3,7 @@
 //! One binary, many subcommands (SPEC.md §40, IMPLEMENTATION.md §1). Anything
 //! not yet implemented says so rather than pretending to succeed.
 
+pub mod audit_cmd;
 pub mod explain_cmd;
 
 /// Re-exported so tests can render the views without going through the CLI.
@@ -13,7 +14,7 @@ pub mod generate;
 mod install_cmd;
 mod notify_cmd;
 mod run_cmd;
-mod status_cmd;
+pub mod status_cmd;
 mod version_cmd;
 
 pub use status_cmd::{EntityStatus, StatusReport};
@@ -162,6 +163,18 @@ pub enum Command {
     Explain {
         /// `capabilities`, `probes` or `paths`. All three when omitted.
         topic: Option<String>,
+    },
+    /// List probes that should be reporting and are not.
+    ///
+    /// `explain probes` says what would run and `entity observations` says
+    /// what did; this joins them. A probe that never runs produces no
+    /// observation, so nothing fails and nothing is diagnosed, and every
+    /// entity reads healthy because nothing ever said otherwise. Exits
+    /// non-zero when something is silent, so it can live in cron.
+    Audit {
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
     },
     /// Notification destinations.
     Notify {
@@ -339,6 +352,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<i32> {
             json,
         } => run_cmd::prune(&cli, *dry_run, *vacuum, observations.as_deref(), *json).await,
         Command::Explain { topic } => explain_cmd::run(&cli, topic.as_deref()).await,
+        Command::Audit { json } => audit_cmd::audit(&cli, *json).await,
         Command::Notify { command } => match command {
             NotifyCommand::Test { provider, severity } => {
                 notify_cmd::test(&cli, provider.as_deref(), severity.as_deref()).await

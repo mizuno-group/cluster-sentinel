@@ -1,102 +1,100 @@
 # Cluster Sentinel
 
-汎用クラスタインフラ監視・障害検知・インシデント診断基盤。
+計算クラスタの監視・障害検知・原因診断ツール。**バイナリ 1 つ**で動きます。
 
-Sentinel は Slurm 監視ツールではありません。研究用計算クラスタを
-`ManagedEntity` の集合（capability と dependency を持つグラフ）としてモデル化し、
-複数地点から観測することで、「応答しなくなった」ではなく **「なぜ壊れているのか」**
-を導出します。
+「ノードが応答しない」ではなく **「なぜ応答しないのか」** を答えることを
+目的にしています。原因が違えば、行くべき場所が違うからです。
 
-区別できることを目標とする状況:
-
-| 状況 | 診断結果 |
+| 見た目 | Sentinel が言うこと |
 | --- | --- |
-| どこからも host へ到達できない | `HOST_UNREACHABLE` |
-| 一部の observer からのみ到達できない | `PATH_SPECIFIC_NETWORK_FAILURE` |
-| Host は応答するが SSH のみ異常 | `SSH_SERVICE_FAILURE` |
-| Host は応答するが Sentinel agent のみ異常 | `SENTINEL_AGENT_FAILURE` |
-| Host は正常で `slurmd` のみ停止 | `SLURMD_SERVICE_FAILURE` |
-| Host は正常だが Slurm 上は DRAIN | `SLURM_ONLY_DEGRADATION` |
-| control plane 自体が異常 | `SLURM_CONTROL_PLANE_FAILURE` |
-| fileserver の export service 障害 | `NFS_SERVICE_FAILURE` |
-| server は正常で 1 client の mount のみ異常 | `NFS_CLIENT_FAILURE` |
-| 同一 storage に依存する複数 client が同時異常 | `SHARED_STORAGE_FAILURE` |
-| 実ハードウェアと scheduler 設定の不一致 | `RESOURCE_CONFIGURATION_MISMATCH` |
+| node に繋がらない | `HOST_UNREACHABLE` — 本当に落ちている |
+| node に繋がらない | `PATH_SPECIFIC_NETWORK_FAILURE` — 経路の一部だけが切れている |
+| node に繋がらない | `SSH_SERVICE_FAILURE` — マシンは生きていて SSH だけ死んでいる |
+| node に繋がらない | `SENTINEL_AGENT_FAILURE` — agent だけ落ちている |
+| node が使えない | `SLURMD_SERVICE_FAILURE` — `slurmd` だけ停止 |
+| node が使えない | `SLURM_ONLY_DEGRADATION` — マシンは正常、Slurm 上で drain |
+| 何台も同時に不調 | `SHARED_STORAGE_FAILURE` — 共有ストレージ 1 台が原因 |
+| fileserver が不調 | `NFS_SERVICE_FAILURE` — マシンは生きていて export だけ死んでいる |
 
-意図的に存在しない診断結果: **`POWER_OFF`**。
-network が沈黙していることは電源状態の証拠ではないため、
-out-of-band な証拠なしにこれを主張しません。
+そのために、1 か所からではなく**複数のノードから互いを観測**し、
+証言を突き合わせて結論を出します。1 台からしか見えていない不調を
+「ホストが落ちた」と言い切ることはしません。
 
-## 現在の状況
+**意図的に存在しない診断結果があります: `POWER_OFF`。**
+ネットワークが沈黙していることは、電源が切れている証拠ではありません。
+BMC のような別系統の証拠なしに、Sentinel はこれを主張しません。
 
-M0-M10（core scope）が完了しています。
-CLI から、クラスタの状態と障害原因を説明できる状態です。
+## はじめに読むもの
 
-`docs/IMPLEMENTATION.md` §97 の v1 受け入れ手順を自動化してあり、
-Docker 疑似クラスタに対して 23 項目すべてが通ります。
+**→ [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md)**
+
+はじめて触る人向けの案内です。30 分でクラスタの状態が見えるようになります。
+
+## ドキュメント
+
+### 使う人向け
+
+| 目的 | ドキュメント |
+| --- | --- |
+| **はじめて触る** | [GETTING_STARTED.md](docs/GETTING_STARTED.md) |
+| **コマンドの一覧と使い分け** | [COMMANDS.md](docs/COMMANDS.md) |
+| 本番クラスタへ本格導入する | [DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| 日々の運用、障害時の読み方、アップグレード | [OPERATIONS.md](docs/OPERATIONS.md) |
+| 設定項目のリファレンス | [CONFIGURATION.md](docs/CONFIGURATION.md) |
+| 何をどこまで守るのか | [SECURITY.md](docs/SECURITY.md) |
+| 多数のノードへ一括配布する | [deploy/ansible/](deploy/ansible/) |
+
+### 中身を知りたい人向け
+
+| 目的 | ドキュメント |
+| --- | --- |
+| 設計の考え方とコードの構成 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| 開発環境・テスト・疑似クラスタ | [DEVELOPMENT.md](docs/DEVELOPMENT.md) |
+| アーキテクチャ仕様（source of truth） | [SPEC.md](docs/SPEC.md) |
+| 実装契約・milestone・テスト要件 | [IMPLEMENTATION.md](docs/IMPLEMENTATION.md) |
+| 自明でなかった設計判断の記録 | [adr/](docs/adr/) |
+| Docker では検証できない項目 | [VM_VALIDATION.md](docs/VM_VALIDATION.md) |
+
+## インストール
+
+コンパイルは不要です。x86_64 と ARM64 の静的バイナリを配布しています。
 
 ```bash
-cd dev/compose && ./scripts/acceptance
+ARCH=$(uname -m) && curl -fsSL -o sentinel "https://github.com/mizuno-group/cluster-sentinel/releases/latest/download/sentinel-${ARCH}-unknown-linux-musl" && chmod +x sentinel && sudo mv sentinel /usr/local/bin/
 ```
 
-| Milestone | 範囲 | 状態 |
-| --- | --- | --- |
-| M0 | Repository / core domain / config / migration / CLI skeleton | 完了 |
-| M1 | Passive controller、Slurm discovery、`sentinel status` | 完了 |
-| M2 | Agent、protocol、spool | 完了 |
-| M3 | Docker Compose 疑似クラスタ | 完了 |
-| M4 | Host / network / SSH / agent 監視 | 完了 |
-| M5 | Slurm 診断 | 完了 |
-| M6 | Storage / NFS | 完了 |
-| M7 | GPU | 完了 |
-| M8 | Peer monitoring | 完了 |
-| M9 | Diagnosis / incident correlation | 完了 |
-| M10 | Notification / operations | 完了 |
-| M11 | VM / 実機検証 | 要件を [docs/VM_VALIDATION.md](docs/VM_VALIDATION.md) に記録（未実施）|
-| M12 | Web UI | 未着手（core 完成後の予定）|
-
-## ビルド
+ソースからビルドする場合:
 
 ```bash
 cargo build --release
 ```
 
-成果物は単一バイナリです。controller、agent、各 CLI 動詞はすべて
-そのサブコマンドとして提供されます。
+## コマンド
+
+controller も agent も CLI も、すべて同じバイナリのサブコマンドです。
 
 ```bash
-sentinel version
-sentinel config check
-sentinel discover
-sentinel status
-sentinel entity list
-sentinel entity show <name>
-sentinel dependency list
-sentinel diagnose
-sentinel peers
-sentinel incident list
-sentinel incident show <id>
-sentinel install controller --dry-run
+sentinel status                   # 今どうなっているか
+sentinel diagnose                 # 何が壊れていて、なぜそう言えるのか
+sentinel explain                  # 何をどうやって見張っているのか
+sentinel audit                    # 動いているはずの検査が動いているか
+sentinel entity observations <n>  # その判断の元になった生の観測
+sentinel notify test              # 通知先に実際に届くか
 ```
 
-いずれも `--json` を付ければ機械可読出力になります。
-`sentinel status` は異常があれば exit code 2 を返すため、
-health check やスクリプトから利用できます。
+**一覧と使い分けは [docs/COMMANDS.md](docs/COMMANDS.md)** にまとめてあります。
 
-## ドキュメント
+いずれも `--json` で機械可読出力になります。
+`sentinel status` は異常があれば exit code 2 を返すので、
+そのまま health check に使えます。
 
-| ドキュメント | 内容 |
-| --- | --- |
-| [docs/SPEC.md](docs/SPEC.md) | アーキテクチャ仕様（source of truth） |
-| [docs/IMPLEMENTATION.md](docs/IMPLEMENTATION.md) | 実装契約・milestone・テスト要件 |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | コードの構成と、その理由 |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 開発環境・テスト・疑似クラスタ |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | **実クラスタ導入マニュアル**（テンプレート付き）|
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | 設定リファレンス |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | 導入・日常運用・トラブルシューティング |
-| [docs/SECURITY.md](docs/SECURITY.md) | 脅威モデルと保証範囲 |
-| [docs/VM_VALIDATION.md](docs/VM_VALIDATION.md) | Docker では検証できない項目の一覧 |
-| [docs/adr/](docs/adr/) | 自明でなかった設計判断の記録 |
+## 動作確認
+
+Docker の疑似クラスタに対して、受け入れ項目 23 件が自動で走ります。
+
+```bash
+cd dev/compose && ./scripts/acceptance
+```
 
 ## ライセンス
 

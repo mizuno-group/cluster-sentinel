@@ -412,8 +412,14 @@ fn default_min_interval() -> std::time::Duration {
 }
 
 fn default_min_severity() -> String {
-    // Informational findings -- a drained node, a configuration mismatch --
-    // belong in `sentinel status`, not in someone's phone at 3am.
+    // Findings that are purely informational -- a configuration mismatch, a
+    // clock skew -- belong in `sentinel status` rather than in someone's
+    // phone at 3am.
+    //
+    // A drained node is *not* one of them in practice, despite starting at
+    // `Info`: severity is raised by how much depends on the entity, and a
+    // compute node always has its `slurmd` service hanging off it. So drains
+    // do notify at this floor. Raise it to `critical` for quiet drains.
     "warning".to_string()
 }
 

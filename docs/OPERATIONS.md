@@ -1,6 +1,10 @@
 # 運用ガイド
 
-Cluster Sentinel を実際に運用するためのガイドです。
+導入が済んだあと、**日々どう使うか**のガイドです。
+障害が出たときの読み方と、よくある症状への対処が中心です。
+
+> 導入がまだの場合は [GETTING_STARTED.md](GETTING_STARTED.md)、
+> 本番構成へ広げる場合は [DEPLOYMENT.md](DEPLOYMENT.md) を先に。
 
 ## 前提
 
@@ -118,6 +122,74 @@ sentinel explain paths           # どの host を誰が、何で監視してい
 
 `status` は Sentinel が**何を結論したか**を言い、`explain` は
 **それがどうやって分かるのか**を言います。
+
+### 「全部 HEALTHY」を鵜呑みにしない
+
+このツールでは、**正しく監視できている状態と、そもそも何も見ていない状態が
+同じ見た目になります。** 全部 HEALTHY という表示だけでは、
+どちらなのか区別できません。
+
+実際に起きた例です。
+
+- ある検査がどこからも実行されていなかった。全ノード HEALTHY のまま、
+  数か月気づかれなかった
+- open な CRITICAL の通知が一度も飛んでいなかった。`status` は
+  「31 healthy」と表示していた
+
+導入直後と、構成を変えたあとには、次の 2 つを見てください。
+
+```bash
+sentinel explain paths
+```
+
+各 host の **`watched by`** を見ます。**ここが空、または 1 台しかない host は、
+実質的に監視されていません。** 到達性の判断には最低 2 つの独立した視点が
+必要で、1 台では Sentinel は判断を保留します。
+
+```bash
+sentinel entity observations <host>
+```
+
+`WHEN` 列が現在時刻の近くで更新され続けているかを見ます。
+特定の検査だけを追うこともできます。
+
+```bash
+sentinel entity observations <host> --probe nfs.server.exports
+```
+
+**「観測がありません」と出たら、その検査は本当に走っていません。**
+capability が付いていない可能性が高いので、`sentinel entity show <host>` の
+Capabilities を確認してください。
+
+### 定期的に `sentinel audit` を回す
+
+上の 2 つは手で確認する手順ですが、**確認し忘れれば同じことです。**
+`sentinel audit` は「有効なのに観測を出していない probe」を挙げ、
+あれば exit code 2 を返します。cron に置いてください。
+
+```bash
+sudo -u sentinel sentinel audit > /dev/null || echo "cluster-sentinel: 監視に穴があります"
+```
+
+沈黙している probe があると `status` の末尾にも 1 行出ます。
+
+```
+⚠ 1 probe(s) have never reported at all; run `sentinel audit` for which
+```
+
+**構成を変えた直後は必ず見てください。** capability の判定が変わって
+probe が静かになるのは、変更した本人にも見えない形で起きます。
+
+### 名前が重複する場合
+
+storage entity は提供元ホストと**同じ名前**を名乗ります
+（`host/filesrv02` と `storage/filesrv02`）。裸の名前で指すと
+どちらか分からないため、その場合は候補が表示されます。
+
+```bash
+sentinel entity show host/filesrv02      # ホストそのもの
+sentinel entity show storage/filesrv02   # そのホストが提供するストレージ
+```
 
 ```
 systemd
@@ -331,6 +403,83 @@ controller 復旧後、spool は自動で再送されます（重複挿入は起
 sentinel doctor   # spool の深さを確認
 ```
 
+### agent が起動直後に落ち続ける
+
+`systemctl status` が再起動ループだけを示し、理由が書かれていない場合、
+**設定ファイルを `sentinel` ユーザーが読めていない**ことが多いです。
+`install` は設定を mode 0640 で書くため、root 所有のままだと
+サービスから開けません。
+
+```bash
+sudo chown sentinel:sentinel /etc/sentinel/*.toml && sudo systemctl restart sentinel-agent
+```
+
+（サービスユーザーが既にあるホストでは `install` が自動で所有者を
+設定するようになっています。古いバージョンで作られたファイルだけ
+手当てが必要です。）
+
+### 通知が来ない
+
+まず宛先そのものを試します。障害を待つ必要はありません。
+
+```bash
+sentinel notify test
+```
+
+**宛先ごとに 1 通だけ**送られます。届かない場合は URL か到達性の問題です。
+
+届くのに障害通知が来ない場合、確認する順に:
+
+1. `sentinel incident list` — そもそも incident になっているか。
+   診断は出ていても、severity が `min_severity` を下回っていれば送られません
+2. `[notification] min_severity` — 導入初期に `"critical"` にしていないか
+3. maintenance window に入っていないか
+
+通知は**状態が変わったときだけ**飛びます。続いている incident を
+繰り返し通知することはありません。これは仕様です。
+
+### 通知が一度に大量に来る
+
+incident 1 件につき 1 通です。多数届いたのなら、多数の incident が
+同時に開いたということです。webhook を初めて設定した直後は、
+**それまでに開いていた incident がまとめて送られます**（一度だけ）。
+
+送信間隔は既定で 1 秒空きます。**間引きではなく間隔をあける**ので、
+通知が捨てられることはありません。webhook 側がより厳しいなら伸ばせます。
+
+```toml
+[notification]
+min_interval = "3s"
+```
+
+### storage の健全性が UNKNOWN のまま
+
+その storage を提供しているホストの **export 検査**が動いていません。
+
+```bash
+sentinel entity observations <fileserver> --probe nfs.server.exports
+```
+
+観測が無い場合、そのホストに `storage.nfs.server` capability が
+付いていない可能性があります。
+
+```bash
+sentinel entity show host/<fileserver>
+```
+
+capability は `/etc/exports` の存在か `exportfs` の有無で判定されます。
+ZFS の `sharenfs` で export している場合も、export の実体は
+`/etc/exports.d/*.exports` にあり、そちらも読まれます。
+
+### 身に覚えのないホストが「NFS が壊れている」と言われる
+
+**export していないホストは、export ゼロでも障害になりません。**
+障害として報告されるのは、**2049 番で何かが listen しているのに
+export が空**の場合だけです（クライアントが接続できて拒否される状態）。
+
+これに該当しないのに報告されるなら、バージョンが v0.3.21 より古い
+可能性があります。
+
 ## ディスク容量と retention
 
 controller の database は書き込み一方です。何も消さなければ埋まります。
@@ -392,19 +541,36 @@ sqlite3 /var/lib/sentinel/sentinel.db ".backup /path/to/backup/sentinel.db"
 ### 1. controller
 
 ```bash
-# 新しいバイナリを取得して検証
-curl -fsSLO https://github.com/mizuno-group/cluster-sentinel/releases/latest/download/sentinel-x86_64-unknown-linux-musl
-curl -fsSLO https://github.com/mizuno-group/cluster-sentinel/releases/latest/download/sentinel-x86_64-unknown-linux-musl.sha256
-sha256sum -c sentinel-x86_64-unknown-linux-musl.sha256
+ARCH=$(uname -m)
+curl -fsSLO "https://github.com/mizuno-group/cluster-sentinel/releases/latest/download/sentinel-${ARCH}-unknown-linux-musl"
+curl -fsSL "https://github.com/mizuno-group/cluster-sentinel/releases/latest/download/sentinel-${ARCH}-unknown-linux-musl.sha256" | sha256sum -c
+```
 
-# 置き換える前に、今の設定が新バイナリで通ることを確認
-sudo -u sentinel ./sentinel-x86_64-unknown-linux-musl \
-  --config /etc/sentinel/config.toml config check
+置き換える前に、**今の設定が新しいバイナリで通ることを確認**します。
+ここで落ちるなら、置き換えてから気づくより先に分かります。
 
-sudo install -m 0755 sentinel-x86_64-unknown-linux-musl /usr/local/bin/sentinel
-sudo systemctl restart sentinel-controller
-sentinel version
-systemctl status sentinel-controller
+```bash
+chmod +x sentinel-*-unknown-linux-musl && sudo -u sentinel ./sentinel-*-unknown-linux-musl --config /etc/sentinel/config.toml config check
+```
+
+```bash
+sudo mv sentinel-*-unknown-linux-musl /usr/local/bin/sentinel && sudo systemctl restart sentinel-controller
+```
+
+> **`cp` や `install` ではなく `mv` を使ってください。**
+> どちらも既存ファイルを truncate しようとするため、
+> **実行中のバイナリに対しては `Text file busy` で失敗します。**
+> `mv` は rename なので、動いているプロセスは古い実体を掴んだまま無事です。
+
+```bash
+sentinel version && systemctl status sentinel-controller --no-pager
+```
+
+**controller と agent が同居しているホスト**（[DEPLOYMENT.md §9.10](DEPLOYMENT.md#910-controller-に-agent-を同居させる)）
+では、バイナリは 1 つなので両方を再起動します。
+
+```bash
+sudo systemctl restart sentinel-controller sentinel-agent
 ```
 
 ### 2. agent（各ノード）
@@ -413,8 +579,19 @@ controller が動いていることを確認してから、同じ手順を各ノ
 ノードが多い場合は [Ansible ロール](../deploy/ansible/)
 の `sentinel_version` を変えて再実行してください。
 
+ロールの `sentinel_version` は**リリースごとに更新されている**ので、
+まず `git pull` してから流すのが確実です。指定が古いままだと
+「もう入っている」と判断されて `changed=0` で終わります。
+
 ```bash
-ansible-playbook -i inventory.ini site.yml -e sentinel_version=v0.3.1 -K
+git -C <このリポジトリ> pull && ansible-playbook -i inventory.ini site.yml -K
+```
+
+一度きり別のバージョンにしたい場合は、`v` を付けて指定します
+（**タグ名がそのまま URL に入る**ので、`v` を落とすと 404 になります）。
+
+```bash
+ansible-playbook -i inventory.ini site.yml -K -e sentinel_version=v0.3.21
 ```
 
 agent が止まっている間の観測は spool に溜まり、復帰後に送られます。

@@ -16,7 +16,7 @@ pub(super) async fn open_store(config: &Config) -> anyhow::Result<SqliteStore> {
 pub async fn status(cli: &Cli, json: bool) -> anyhow::Result<i32> {
     let config = Config::load(&cli.config)?;
     let store = open_store(&config).await?;
-    let report = status_cmd::load_report(&store, &config.environment).await?;
+    let report = status_cmd::load_report_with(&store, &config.environment, Some(&config)).await?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);

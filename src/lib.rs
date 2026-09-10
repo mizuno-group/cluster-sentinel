@@ -21,6 +21,7 @@
 //! The core must never depend on an integration.
 
 pub mod agent;
+pub mod audit;
 pub mod capability;
 pub mod cli;
 pub mod command;
