@@ -273,6 +273,22 @@ async fn an_incident_and_its_evidence_survive_a_controller_restart() {
             ManagedEntity::new("lab", EntityType::Host, "fs1")
                 .with_capabilities(["storage.nfs.server"].into_iter().collect()),
         );
+        // A fileserver with a storage domain and a client. The subject here is
+        // incident persistence, not storage, but the world still has to be one
+        // the rules recognise: a host nobody mounts from has no export service
+        // to fail.
+        snapshot.add_entity(ManagedEntity::new("lab", EntityType::Storage, "storage-a"));
+        snapshot.add_entity(ManagedEntity::new("lab", EntityType::Host, "c1"));
+        snapshot.add_dependency(DependencyEdge::new(
+            storage("storage-a"),
+            host("fs1"),
+            DependencyType::Provides,
+        ));
+        snapshot.add_dependency(DependencyEdge::new(
+            host("c1"),
+            storage("storage-a"),
+            DependencyType::UsesStorage,
+        ));
         controller.ingest_snapshot(&snapshot).await.expect("inventory");
 
         make_healthy(&mut controller, &["fs1"]).await;
@@ -322,6 +338,22 @@ async fn a_restart_does_not_re_alert_on_an_already_open_incident() {
             ManagedEntity::new("lab", EntityType::Host, "fs1")
                 .with_capabilities(["storage.nfs.server"].into_iter().collect()),
         );
+        // A fileserver with a storage domain and a client. The subject here is
+        // incident persistence, not storage, but the world still has to be one
+        // the rules recognise: a host nobody mounts from has no export service
+        // to fail.
+        snapshot.add_entity(ManagedEntity::new("lab", EntityType::Storage, "storage-a"));
+        snapshot.add_entity(ManagedEntity::new("lab", EntityType::Host, "c1"));
+        snapshot.add_dependency(DependencyEdge::new(
+            storage("storage-a"),
+            host("fs1"),
+            DependencyType::Provides,
+        ));
+        snapshot.add_dependency(DependencyEdge::new(
+            host("c1"),
+            storage("storage-a"),
+            DependencyType::UsesStorage,
+        ));
         controller.ingest_snapshot(&snapshot).await.expect("inventory");
         make_healthy(&mut controller, &["fs1"]).await;
         break_storage_service(&mut controller).await;

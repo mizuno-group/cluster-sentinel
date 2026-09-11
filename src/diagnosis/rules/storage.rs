@@ -31,6 +31,42 @@ fn host_looks_healthy(context: &DiagnosisContext, host: EntityId) -> bool {
         && (context.is_healthy(host, StateComponent::Agent) || context.is_healthy(host, StateComponent::Ssh))
 }
 
+/// Whether anything in the cluster actually uses what this host serves.
+///
+/// The capability that gates the export probes is detected from the server
+/// software being *present*, which is true of many machines that serve nothing
+/// -- clients usually have it too. On such a host the export service is often
+/// running as well, answering on its port with an empty export list. That is
+/// not a fault. It is what an ordinary host with the package installed looks
+/// like, and there is nobody to be refused.
+///
+/// The graph knows the difference, because it is derived from mounts that
+/// clients actually have: a storage domain exists for a host only when someone
+/// mounts from it. So this rule asks the graph rather than the packages.
+///
+/// A fileserver whose exports vanish keeps its clients here -- a mount that is
+/// refused stays in the client's mount table -- so the case this rule exists
+/// for still fires.
+fn serves_anyone(context: &DiagnosisContext, host: EntityId) -> bool {
+    let graph = context.inventory.graph();
+
+    graph
+        .downstream(host, None)
+        .into_iter()
+        .filter(|reachable| {
+            context
+                .entity(reachable.entity)
+                .is_some_and(|e| e.entity_type == EntityType::Storage)
+        })
+        .any(|storage| {
+            graph.downstream(storage.entity, None).into_iter().any(|client| {
+                context
+                    .entity(client.entity)
+                    .is_some_and(|e| e.entity_type == EntityType::Host && e.id != host)
+            })
+        })
+}
+
 /// Whether an entity's storage is currently impaired.
 fn storage_is_impaired(context: &DiagnosisContext, entity: EntityId) -> bool {
     matches!(
@@ -90,6 +126,15 @@ impl DiagnosisRule for StorageServiceFailure {
             let serving_nothing = exports_empty && port_answers;
 
             if !port_failed && !serving_nothing {
+                continue;
+            }
+
+            // Nobody uses what this host serves, so there is nothing here to
+            // fail. A head node with the server package installed answers on
+            // its export port and exports nothing, which satisfies the check
+            // above -- and it was reported as a broken fileserver at critical
+            // the moment peers began probing that port.
+            if !serves_anyone(context, host.id) {
                 continue;
             }
 
@@ -547,6 +592,62 @@ mod tests {
             "{}",
             diagnoses[0].summary
         );
+    }
+
+    #[test]
+    fn a_host_nobody_uses_is_not_diagnosed_even_when_its_port_answers() {
+        // Found on a live cluster the day peers began probing the export port.
+        // The head node has the server package installed, so the capability is
+        // in force and the service answers -- with nothing exported, because it
+        // is a client, not a server. That satisfied the "port answers while it
+        // exports nothing" check and raised a critical against a machine doing
+        // exactly what it should.
+        //
+        // The graph is what tells the difference: a storage domain exists for a
+        // host only when someone actually mounts from it.
+        let world = World::new()
+            .fileserver("head")
+            .host("c1")
+            .observe("head", PROBE_SERVER_PORT, ProbeStatus::Ok)
+            .exports("head", 0)
+            .host_is_up("head");
+
+        assert!(
+            world.evaluate(&StorageServiceFailure).is_empty(),
+            "nobody mounts from this host, so there is nothing here to fail"
+        );
+    }
+
+    #[test]
+    fn a_fileserver_someone_uses_is_still_diagnosed_when_it_serves_nothing() {
+        // The other half: same evidence, but the graph says clients depend on
+        // it. Those clients connect and are refused, which is the confusing
+        // outage this rule exists to name.
+        let world = two_domains()
+            .host_is_up("fs-a")
+            .observe("fs-a", PROBE_SERVER_PORT, ProbeStatus::Ok)
+            .exports("fs-a", 0);
+
+        let diagnoses = world.evaluate(&StorageServiceFailure);
+        assert_eq!(diagnoses.len(), 1, "{diagnoses:#?}");
+        assert!(
+            diagnoses[0].summary.contains("exports nothing"),
+            "{}",
+            diagnoses[0].summary
+        );
+    }
+
+    #[test]
+    fn a_port_failure_on_a_host_nobody_uses_is_also_ignored() {
+        // The same reasoning applies to the other branch. A stopped export
+        // service on a machine nothing mounts from harms no one.
+        let world = World::new()
+            .fileserver("head")
+            .host("c1")
+            .observe("head", PROBE_SERVER_PORT, ProbeStatus::Failed)
+            .host_is_up("head");
+
+        assert!(world.evaluate(&StorageServiceFailure).is_empty());
     }
 
     #[test]
