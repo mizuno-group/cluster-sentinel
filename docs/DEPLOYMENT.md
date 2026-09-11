@@ -159,7 +159,7 @@ sentinel version
 ```
 
 ```
-sentinel 0.3.21
+sentinel 1.0.0
 protocol version: 1
 config version:   1
 target:           x86_64-unknown-linux-musl

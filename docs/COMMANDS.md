@@ -88,6 +88,11 @@ sentinel status
 open な incident があれば、entity 一覧の**前に**表示されます。
 その場合 exit code は 2 になります。
 
+末尾には、必要なときだけ次の行が出ます。
+
+- **agent のバージョンが混在している**とき（更新中は正常、更新後なら見落とし）
+- **沈黙している probe があるとき**（`sentinel audit` へ誘導）
+
 > **全部 HEALTHY を鵜呑みにしないでください。** この表示は、正しく監視
 > できている状態と、そもそも何も見ていない状態で**同じ見た目**になります。
 > 見分け方は `explain paths` と `entity observations` です
@@ -212,7 +217,7 @@ sudo -u sentinel sentinel audit > /dev/null || echo "監視に穴があります
 ### `sentinel entity show <name>`
 
 1 つの entity の詳細。capability、component ごとの健全性、
-どのアドレスで probe されているか、報告されたハードウェア。
+どのアドレスで probe されているか、**agent のバージョン**、報告されたハードウェア。
 
 ```bash
 sentinel entity show compute02
@@ -405,7 +410,7 @@ sudo -u sentinel sentinel -vv controller
 ## `sentinel version`
 
 ```
-sentinel 0.3.21
+sentinel 1.0.0
 protocol version: 1
 config version:   1
 target:           x86_64-unknown-linux-musl

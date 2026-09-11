@@ -89,6 +89,7 @@ enabled = true
 | `listen` | `host:port` | `0.0.0.0:7443` | controller の待受アドレス |
 | `inventory_interval` | duration | `5m` | inventory discovery の実行間隔（`scontrol` 実行・全 host probe を伴う） |
 | `diagnosis_interval` | duration | `15s` | 診断・相関・通知の実行間隔 |
+| `observe` | bool | `true` | controller 自身も観測点として動作するか |
 
 `diagnosis_interval` は **障害発生から通知までの遅延を決める値**です。
 保存済みデータを読むだけなので安価であり、
@@ -465,6 +466,10 @@ name = "shared-a"
 `name` は canonical name であり、`(environment, type)` 内で一意です。
 address と port は到達性のためのデータであり identity ではありません
 — 1 entity が複数 address を持てますし、port を変えても同じ entity です。
+
+`display_name` は表示にのみ使う別名です。省略すると `name` が使われます。
+`cluster` は複数クラスタを 1 つの environment で扱うときのグループ名で、
+どちらも **probe を有効にしません**（capability だけが probe を決めます）。
 
 `ports` は **agent がいない host** に必要です。
 agent がいる host は自分でポートを報告します。

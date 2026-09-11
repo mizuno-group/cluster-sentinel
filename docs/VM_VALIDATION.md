@@ -128,7 +128,33 @@ Docker / VM で代替できるものはそちらで行ってください。
 | 1 | unit / mock | 自動化済み・CI 実行可能 |
 | 2 | in-process simulation | 自動化済み・CI 実行可能 |
 | 3 | Docker 疑似クラスタ | 自動化済み（`dev/compose/scripts/acceptance`、23 項目）。cgroup は v2 実階層だが scope 作成は systemd 経由ではない |
-| 4 | VM / 実機 | **未実施**。本書が要件一覧 |
+| 4 | VM / 実機 | **一部実施**。下記の通り |
+
+### 実機で確認できたこと
+
+16 host（x86_64 と ARM64 の混在）、Slurm、ZFS `sharenfs` による NFS、
+非標準 SSH ポートという構成で運用し、次を確認しました。
+
+| 項目 | 結果 |
+| --- | --- |
+| Ansible による agent の一括配布 | 15 node へ配布、冪等性を確認 |
+| **異なるアーキテクチャの混在** | 各 host が自分の arch のバイナリを取得 |
+| **非標準 SSH ポート** | agent が `sshd_config` から読んで報告。手動宣言なしで到達性判定が成立 |
+| **実 NFS** | ZFS `sharenfs`（`root_squash`）。依存グラフが実構成と一致 |
+| **通知の全経路** | 障害 → incident → 通知 → 復旧 → RESOLVED まで実測 |
+| controller 再起動 | 対応中の incident が再通知されないこと |
+| **複数 NIC の host** | agent が報告するアドレスの選定 |
+| controller と agent の同居 | 設定パスを分けて共存 |
+| probe audit | 監視の穴を 1 件検出し、修正後に閉塞を確認 |
+
+### 実機でまだ確認していないこと
+
+| 項目 | なぜ未確認か |
+| --- | --- |
+| **TLS** | 当該クラスタは平文 HTTP で運用中 |
+| **長期運用後の retention / prune** | 数週間分の蓄積がまだない |
+| **本物の host 障害**（`HOST_UNREACHABLE`） | 稼働中のクラスタで node を落とせない。疑似クラスタでは検証済み |
+| BMC / 電源状態 | v1 の対象外 |
 
 ## TLS
 

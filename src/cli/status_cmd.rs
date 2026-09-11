@@ -45,6 +45,13 @@ pub struct EntityStatus {
     /// host reports 0" cannot be checked against what the host actually said.
     /// `null` for a count means not stated, which is different from zero.
     pub hardware: Option<serde_json::Value>,
+    /// The version of the agent that registered this entity, if one did.
+    ///
+    /// Stored since the first release and shown nowhere, which made "is the
+    /// fleet actually on the version I just rolled out" unanswerable from the
+    /// CLI -- during an upgrade, the one question being asked. A mixed fleet
+    /// is normal mid-upgrade and a surprise afterwards.
+    pub agent_version: Option<String>,
     /// Inventory lifecycle.
     pub lifecycle: String,
     /// Capabilities in force.
@@ -92,6 +99,15 @@ pub struct StatusReport {
     /// to look for the probe that had never run.
     #[serde(default)]
     pub silent_probes: Option<String>,
+    /// How many agents report each version.
+    ///
+    /// Shown only when they disagree. A mixed fleet is expected during an
+    /// upgrade and a surprise after one -- and "did that rollout actually
+    /// reach the nodes" was not answerable from the CLI at all, which cost an
+    /// afternoon when an Ansible run reported no changes because it was
+    /// pinned to the version already installed.
+    #[serde(default)]
+    pub agent_versions: BTreeMap<String, usize>,
     /// Count per health value.
     pub totals: BTreeMap<String, usize>,
 }
@@ -118,11 +134,19 @@ impl StatusReport {
             *totals.entry(entity.health.clone()).or_default() += 1;
         }
 
+        let mut agent_versions: BTreeMap<String, usize> = BTreeMap::new();
+        for entity in &entities {
+            if let Some(version) = &entity.agent_version {
+                *agent_versions.entry(version.clone()).or_default() += 1;
+            }
+        }
+
         Self {
             environment: environment.to_string(),
             entities,
             incidents: Vec::new(),
             silent_probes: None,
+            agent_versions,
             totals,
         }
     }
@@ -213,6 +237,12 @@ fn describe(entity: &ManagedEntity, state: Option<&EntityState>) -> EntityStatus
             })
             .unwrap_or_default(),
         hardware: entity.metadata.get("hardware").filter(|v| !v.is_null()).cloned(),
+        agent_version: entity
+            .metadata
+            .get("agent")
+            .and_then(|a| a.get("version"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
         lifecycle: entity.lifecycle_state.as_str().to_string(),
         capabilities: entity.capabilities.iter().map(|c| c.as_str().to_string()).collect(),
     }
@@ -336,6 +366,15 @@ pub fn render(report: &StatusReport) -> String {
     // Last line, and only when there is something to say. All-green looks
     // identical whether the cluster is healthy or nothing is watching it, and
     // this is the one line that tells those apart without being asked.
+    if report.agent_versions.len() > 1 {
+        let versions: Vec<String> = report
+            .agent_versions
+            .iter()
+            .map(|(version, count)| format!("{version} ({count})"))
+            .collect();
+        out.push_str(&format!("\nagent のバージョンが混在: {}\n", versions.join(", ")));
+    }
+
     if let Some(silence) = &report.silent_probes {
         out.push_str(&format!("\n⚠ {silence}\n"));
     }
@@ -400,6 +439,10 @@ pub fn render_entity(entity: &EntityStatus) -> String {
         for capability in &entity.capabilities {
             out.push_str(&format!("{capability}\n"));
         }
+    }
+
+    if let Some(version) = &entity.agent_version {
+        out.push_str(&format!("\nAgent:\n{version}\n"));
     }
 
     if let Some(hardware) = &entity.hardware {

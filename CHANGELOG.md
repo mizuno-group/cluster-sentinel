@@ -20,6 +20,39 @@
 * Ansible ロール（`deploy/ansible/`）
 * release workflow（x86_64 / aarch64 の静的リンクバイナリ）
 
+## v1.0.0
+
+実クラスタ（16 host）での 2 日間の運用と、そこで見つかった 11 件の修正を経て
+v1.0 とします。バージョン番号の変更以外に機能の追加はありません。
+
+* **`sentinel config show` が webhook URL を平文で出力していた**（修正）。
+  webhook URL は credential であり、それを持つ者はそのチャンネルへ
+  投稿できます。**設定ファイルを world-readable にしていない理由がそれ**
+  なのに、コマンドが出力していました。この出力は、助けを求めるときに
+  そのまま貼り付けられる類のものです。
+  * `(redacted — see the configuration file)` に置き換えます。
+    「設定されていて隠されている」と「そもそも設定されていない」は
+    別の問題なので、空欄にはしません。
+  * Ansible role が読む項目（environment / probes / TLS / port）は
+    そのまま残ることをテストで固定しました。
+
+* **ドキュメントの精査。**
+  * 設定キーの記載漏れ 3 件（`[controller] observe`、
+    `[[entities]] display_name` / `cluster`）を追加。
+  * `VM_VALIDATION.md` の「Level 4 未実施」を実態に合わせました。
+    実機で確認できたこと（arch 混在、非標準 SSH ポート、実 NFS、
+    通知の全経路、複数 NIC、controller と agent の同居、probe audit）と、
+    **まだ確認していないこと**（TLS、長期運用後の retention、
+    本物の host 障害）を分けて記載。
+  * 全 Markdown に対し、リンク・アンカー・bash ブロック内のコマンド実在性・
+    設定キーの網羅を機械検査。破損 0 件。
+
+### 互換性
+
+1.x の間、`config_version` と `protocol_version` は `1` のまま、
+`--json` のフィールドは追加のみ、終了コードは不変とします。
+人が読むテキスト出力は変わることがあります。
+
 ## v0.3.23
 
 `sentinel audit` を実クラスタ（16 host）で初めて走らせた結果の 3 件。

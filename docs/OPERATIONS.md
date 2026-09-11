@@ -477,8 +477,7 @@ ZFS の `sharenfs` で export している場合も、export の実体は
 障害として報告されるのは、**2049 番で何かが listen しているのに
 export が空**の場合だけです（クライアントが接続できて拒否される状態）。
 
-これに該当しないのに報告されるなら、バージョンが v0.3.21 より古い
-可能性があります。
+これに該当しないのに報告されるなら、その判定は v1.0 より前の挙動です。
 
 ## ディスク容量と retention
 
@@ -591,7 +590,7 @@ git -C <このリポジトリ> pull && ansible-playbook -i inventory.ini site.ym
 （**タグ名がそのまま URL に入る**ので、`v` を落とすと 404 になります）。
 
 ```bash
-ansible-playbook -i inventory.ini site.yml -K -e sentinel_version=v0.3.21
+ansible-playbook -i inventory.ini site.yml -K -e sentinel_version=v1.0.0
 ```
 
 agent が止まっている間の観測は spool に溜まり、復帰後に送られます。

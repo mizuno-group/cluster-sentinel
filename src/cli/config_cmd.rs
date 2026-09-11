@@ -140,8 +140,31 @@ fn check(cli: &Cli, json: bool) -> anyhow::Result<i32> {
     Ok(if report.is_ok() { 0 } else { 1 })
 }
 
+/// What a redacted secret is replaced with.
+///
+/// Named rather than blanked so the reader can tell "this was set and is
+/// hidden" from "this was never set", which are different problems.
+pub const REDACTED: &str = "(redacted — see the configuration file)";
+
+/// Hide the secrets in a configuration that is about to be printed.
+///
+/// A webhook URL is a credential: anyone holding one can post into the channel
+/// it names. It is the reason the configuration file is not world-readable,
+/// and printing it here undid that -- this output is exactly the sort of thing
+/// that gets pasted into a chat message or an issue while someone asks for
+/// help. The credential file is kept out of unit files and environments for
+/// the same reason.
+fn redacted(mut config: Config) -> Config {
+    for webhook in &mut config.notification.webhooks {
+        if !webhook.url.is_empty() {
+            webhook.url = REDACTED.to_string();
+        }
+    }
+    config
+}
+
 fn show(cli: &Cli, json: bool) -> anyhow::Result<i32> {
-    let config = Config::load(&cli.config)?;
+    let config = redacted(Config::load(&cli.config)?);
     if json {
         println!("{}", serde_json::to_string_pretty(&config)?);
     } else {
@@ -206,5 +229,61 @@ mod tests {
         let (_dir, path) = write_config("config_version = 1\nenvironment = \"lab\"\n");
         assert_eq!(show(&cli_for(&path), true).expect("show json"), 0);
         assert_eq!(show(&cli_for(&path), false).expect("show toml"), 0);
+    }
+
+    #[test]
+    fn a_webhook_url_is_not_printed() {
+        // It is a credential: anyone holding it can post into that channel.
+        // This output gets pasted into chat messages while asking for help,
+        // which is the whole reason the configuration file is not
+        // world-readable in the first place.
+        let config = Config::from_toml(
+            "config_version = 1\nenvironment = \"lab\"\n\n\
+             [[notification.webhooks]]\nname = \"ops\"\n\
+             url = \"https://hooks.slack.com/services/T0/B0/XXXXXXXX\"\n",
+            std::path::Path::new("test.toml"),
+        )
+        .expect("config");
+
+        let shown = redacted(config);
+        assert_eq!(shown.notification.webhooks[0].url, REDACTED);
+        assert_eq!(
+            shown.notification.webhooks[0].name, "ops",
+            "the name still has to be usable with --provider"
+        );
+
+        let json = serde_json::to_string(&shown).expect("json");
+        assert!(!json.contains("XXXXXXXX"), "{json}");
+        assert!(!json.contains("hooks.slack.com"), "{json}");
+    }
+
+    #[test]
+    fn a_configuration_with_no_webhooks_is_unchanged() {
+        let config = Config::from_toml(
+            "config_version = 1\nenvironment = \"lab\"\n",
+            std::path::Path::new("test.toml"),
+        )
+        .expect("config");
+        assert_eq!(redacted(config.clone()), config);
+    }
+
+    #[test]
+    fn everything_the_ansible_role_reads_survives_redaction() {
+        // The role distributes settings by reading `config show --json` on the
+        // controller. Redaction must not take away what it needs, or a fleet
+        // stops being configurable from one place.
+        let config = Config::from_toml(
+            "config_version = 1\nenvironment = \"lab\"\n\n\
+             [controller]\nlisten = \"0.0.0.0:7443\"\n\n\
+             [probes.\"network.tcp\"]\ninterval = \"9s\"\n\n\
+             [[notification.webhooks]]\nname = \"ops\"\nurl = \"https://example.invalid/x\"\n",
+            std::path::Path::new("test.toml"),
+        )
+        .expect("config");
+
+        let shown = redacted(config);
+        assert_eq!(shown.environment, "lab");
+        assert_eq!(shown.controller.listen, "0.0.0.0:7443");
+        assert!(shown.probes.get("network.tcp").is_some());
     }
 }

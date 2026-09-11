@@ -1057,6 +1057,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_agent_version_is_visible_and_skew_is_called_out() {
+        // "Did that rollout actually reach the nodes" was not answerable from
+        // the CLI. The version has been stored at registration since the first
+        // release and displayed nowhere -- which cost an afternoon when an
+        // Ansible run reported no changes because it was pinned to the version
+        // already installed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli = cli_for(&write_config(
+            dir.path(),
+            "\n[[entities]]\ntype = \"host\"\nname = \"node-a\"\n\n[[entities]]\ntype = \"host\"\nname = \"node-b\"\n",
+        ));
+        discover(&cli, false).await.expect("discover");
+
+        let config = Config::load(&cli.config).expect("config");
+        let store = SqliteStore::open(&config.database.path).await.expect("store");
+        let mut inventory = store.load_inventory("lab").await.expect("inventory");
+
+        for (name, version) in [("node-a", "0.3.23"), ("node-b", "0.3.22")] {
+            let id = crate::entity::EntityKey::new("lab", crate::entity::EntityType::Host, name).entity_id();
+            let mut entity = inventory.get(id).expect(name).clone();
+            entity.metadata = serde_json::json!({"agent": {"version": version}});
+            inventory.insert_entity(entity);
+        }
+        store.save_inventory(&inventory).await.expect("save");
+
+        let report = status_cmd::load_report(&store, "lab").await.expect("report");
+        store.close().await;
+
+        let shown = report.entities.iter().find(|e| e.name == "node-a").expect("node-a");
+        assert_eq!(shown.agent_version.as_deref(), Some("0.3.23"));
+        assert!(status_cmd::render_entity(shown).contains("0.3.23"));
+
+        assert_eq!(report.agent_versions.len(), 2, "{:?}", report.agent_versions);
+        let rendered = status_cmd::render(&report);
+        assert!(rendered.contains("バージョンが混在"), "{rendered}");
+        assert!(rendered.contains("0.3.22") && rendered.contains("0.3.23"), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn a_fleet_on_one_version_says_nothing_about_versions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli = cli_for(&write_config(
+            dir.path(),
+            "\n[[entities]]\ntype = \"host\"\nname = \"node-a\"\n",
+        ));
+        discover(&cli, false).await.expect("discover");
+
+        let config = Config::load(&cli.config).expect("config");
+        let store = SqliteStore::open(&config.database.path).await.expect("store");
+        let report = status_cmd::load_report(&store, "lab").await.expect("report");
+        store.close().await;
+
+        assert!(!status_cmd::render(&report).contains("バージョンが混在"));
+    }
+
+    #[tokio::test]
     async fn a_host_that_reported_no_hardware_shows_no_hardware_section() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cli = cli_for(&write_config(
