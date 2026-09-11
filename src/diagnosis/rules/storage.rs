@@ -48,23 +48,29 @@ fn host_looks_healthy(context: &DiagnosisContext, host: EntityId) -> bool {
 /// refused stays in the client's mount table -- so the case this rule exists
 /// for still fires.
 fn serves_anyone(context: &DiagnosisContext, host: EntityId) -> bool {
-    let graph = context.inventory.graph();
+    use crate::dependency::DependencyType;
 
-    graph
-        .downstream(host, None)
-        .into_iter()
-        .filter(|reachable| {
-            context
-                .entity(reachable.entity)
-                .is_some_and(|e| e.entity_type == EntityType::Storage)
-        })
-        .any(|storage| {
-            graph.downstream(storage.entity, None).into_iter().any(|client| {
-                context
-                    .entity(client.entity)
-                    .is_some_and(|e| e.entity_type == EntityType::Host && e.id != host)
-            })
-        })
+    // Direct edges, not reachability. Transitive closure is the wrong tool
+    // here and spectacularly so: a head node hosts the scheduler service,
+    // every compute node depends on the scheduler, and some of those nodes
+    // provide storage -- so "everything that transitively depends on the head
+    // node" reaches most of the cluster, including storage domains it has
+    // nothing to do with. Walking one more hop from there reaches every host
+    // again. Asked that way, every host serves everyone.
+    //
+    // The two edges that actually mean "this host serves storage that someone
+    // uses" are the ones the derivation writes, and they are one hop each.
+    let graph = context.inventory.graph();
+    let provided: Vec<EntityId> = graph
+        .edges()
+        .iter()
+        .filter(|edge| edge.dependency_type == DependencyType::Provides && edge.target == host)
+        .map(|edge| edge.source)
+        .collect();
+
+    graph.edges().iter().any(|edge| {
+        edge.dependency_type == DependencyType::UsesStorage && provided.contains(&edge.target) && edge.source != host
+    })
 }
 
 /// Whether an entity's storage is currently impaired.
@@ -495,6 +501,29 @@ mod tests {
             self
         }
 
+        /// The chain a head node really has: it hosts the scheduler service,
+        /// and every compute node depends on the scheduler.
+        fn scheduler_on(mut self, head: &str, computes: &[&str]) -> Self {
+            let scheduler = EntityKey::new("lab", EntityType::Scheduler, "slurm").entity_id();
+            let service = EntityKey::new("lab", EntityType::Service, "slurmctld").entity_id();
+            self.inventory
+                .insert_entity(ManagedEntity::new("lab", EntityType::Scheduler, "slurm"));
+            self.inventory
+                .insert_entity(ManagedEntity::new("lab", EntityType::Service, "slurmctld"));
+            self.inventory
+                .insert_dependency(DependencyEdge::new(service, host_id(head), DependencyType::HostedOn));
+            self.inventory
+                .insert_dependency(DependencyEdge::new(scheduler, service, DependencyType::Provides));
+            for compute in computes {
+                self.inventory.insert_dependency(DependencyEdge::new(
+                    host_id(compute),
+                    scheduler,
+                    DependencyType::UsesScheduler,
+                ));
+            }
+            self
+        }
+
         fn storage_health(mut self, name: &str, health: Health) -> Self {
             let id = host_id(name);
             let state = self.states.entry(id).or_insert_with(|| EntityState::unknown(id));
@@ -615,6 +644,36 @@ mod tests {
         assert!(
             world.evaluate(&StorageServiceFailure).is_empty(),
             "nobody mounts from this host, so there is nothing here to fail"
+        );
+    }
+
+    #[test]
+    fn a_head_node_is_not_dragged_in_through_the_scheduler() {
+        // The first attempt at this asked the graph for everything that
+        // *transitively* depends on the host, which on a real cluster reaches
+        // most of it: the head node hosts the scheduler service, every compute
+        // node depends on the scheduler, and some of those nodes serve
+        // storage. One hop further reaches every host again. Asked that way,
+        // every host serves everyone, and the head node kept its critical.
+        //
+        // Only two edges mean "this host serves storage someone uses", and
+        // they are one hop each.
+        let world = World::new()
+            .fileserver("head")
+            .host("c1")
+            .host("c2")
+            .scheduler_on("head", &["c1", "c2"])
+            // c1 serves storage, and the head node is its only client -- the
+            // shape that made the transitive version reach back round.
+            .storage("storage-c1", "c1")
+            .uses("head", "storage-c1")
+            .observe("head", PROBE_SERVER_PORT, ProbeStatus::Ok)
+            .exports("head", 0)
+            .host_is_up("head");
+
+        assert!(
+            world.evaluate(&StorageServiceFailure).is_empty(),
+            "nobody mounts from the head node; the scheduler chain is not storage"
         );
     }
 
