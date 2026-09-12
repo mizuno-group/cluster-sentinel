@@ -6,6 +6,7 @@
 
 mod entities;
 mod incidents;
+mod maintenance;
 mod notifications;
 mod observations;
 mod retention;

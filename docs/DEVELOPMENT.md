@@ -47,6 +47,17 @@ Level 1 と 2 は、Rust toolchain さえあれば Docker 無しで必ず通り�
 Docker Compose による 6 container の疑似クラスタが `dev/compose/` にあります。
 controller 1、compute 3、fileserver 2 という構成です。
 
+**実クラスタの形に寄せてあります。** 単純な構成では見つからない欠陥が
+3 つ続けて実機で出たためで、具体的には次の 3 点が入っています。
+
+| 形 | なぜ必要か |
+| --- | --- |
+| controller host が **agent も動かす** | 内側からも監視され、かつ peer の監視対象でもある host。controller は自分自身に probe を打たないので、この形でしか出ない穴がある |
+| **計算ノードの 1 台がストレージも提供する** | 依存グラフに閉路ができる（storage → その host → scheduler → scheduler が乗る host → その storage）。グラフを推移的に辿るルールはここで破綻する |
+| head node が **export ゼロで export port に応答する** | NFS サーバのパッケージが入っているだけの host。誤検知の常連 |
+
+いずれも実クラスタでは当たり前の構成です。
+
 ```bash
 cd dev/compose
 ./scripts/up

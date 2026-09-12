@@ -18,7 +18,7 @@
 //! dependency graph, so replacing NFS with anything else needs no change here
 //! (SPEC.md §78, §146).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diagnosis::{kind, Confidence, Diagnosis, DiagnosisContext, DiagnosisRule, RuleId};
 use crate::entity::{EntityId, EntityType};
@@ -71,6 +71,42 @@ fn serves_anyone(context: &DiagnosisContext, host: EntityId) -> bool {
     graph.edges().iter().any(|edge| {
         edge.dependency_type == DependencyType::UsesStorage && provided.contains(&edge.target) && edge.source != host
     })
+}
+
+/// The storage domains a host uses, from its own edges.
+///
+/// Direct edges, for the same reason [`serves_anyone`] uses them: a real
+/// cluster's graph contains a loop -- storage is provided by a host that
+/// depends on the scheduler, which is hosted on a machine that mounts storage
+/// -- and a transitive walk from any host arrives at every storage domain in
+/// the cluster. Asked that way, a host "uses" storage it has never heard of,
+/// and the diagnosis says so out loud: one node was reported as having lost
+/// access to four domains when it declares one.
+fn storages_used(context: &DiagnosisContext, host: EntityId) -> Vec<EntityId> {
+    use crate::dependency::DependencyType;
+
+    context
+        .inventory
+        .graph()
+        .dependencies_of_type(host, &DependencyType::UsesStorage)
+        .into_iter()
+        .map(|edge| edge.target)
+        .collect()
+}
+
+/// The hosts that use a storage domain, from their own edges.
+fn clients_of(context: &DiagnosisContext, storage: EntityId) -> BTreeSet<EntityId> {
+    use crate::dependency::DependencyType;
+
+    context
+        .inventory
+        .graph()
+        .edges()
+        .iter()
+        .filter(|edge| edge.dependency_type == DependencyType::UsesStorage && edge.target == storage)
+        .map(|edge| edge.source)
+        .filter(|id| context.entity(*id).is_some_and(|e| e.entity_type == EntityType::Host))
+        .collect()
 }
 
 /// Whether an entity's storage is currently impaired.
@@ -204,12 +240,25 @@ impl DiagnosisRule for SharedStorageFailure {
             return Vec::new();
         }
 
-        let mut diagnoses = Vec::new();
-        let groups = context.inventory.graph().group_by_shared_upstream(&impaired, None);
+        // Grouped by the storage each host *declares* it uses, not by what the
+        // graph can reach from it. Reachability was the original approach and
+        // it cannot survive a loop: a real cluster's storage is provided by a
+        // host that depends on the scheduler, which is hosted on a machine that
+        // mounts storage, so walking upstream from any host arrives at every
+        // storage domain there is. Every impaired host would then "share" every
+        // domain with every other, and the shared-storage rule would name a
+        // fileserver for a fault that has nothing to do with it.
+        let mut by_storage: BTreeMap<EntityId, BTreeSet<EntityId>> = BTreeMap::new();
+        for host in &impaired {
+            for storage in storages_used(context, *host) {
+                by_storage.entry(storage).or_default().insert(*host);
+            }
+        }
+        by_storage.retain(|_, members| members.len() > 1);
 
-        for (upstream, members) in groups {
-            // Only storage entities are interesting here: every node in a
-            // cluster shares a scheduler, and that is not a storage fault.
+        let mut diagnoses = Vec::new();
+
+        for (upstream, members) in by_storage {
             let Some(entity) = context.entity(upstream) else {
                 continue;
             };
@@ -220,19 +269,7 @@ impl DiagnosisRule for SharedStorageFailure {
             // Is this really shared, or is it simply that every client of this
             // storage happens to be broken for its own reasons? If some client
             // of the same storage is fine, the storage is probably not at fault.
-            let all_clients: BTreeSet<EntityId> = context
-                .inventory
-                .graph()
-                .downstream(upstream, None)
-                .into_iter()
-                .map(|r| r.entity)
-                .filter(|id| {
-                    context
-                        .entity(*id)
-                        .map(|e| e.entity_type == EntityType::Host)
-                        .unwrap_or(false)
-                })
-                .collect();
+            let all_clients: BTreeSet<EntityId> = clients_of(context, upstream);
 
             let healthy_clients: Vec<EntityId> =
                 all_clients.iter().copied().filter(|id| !members.contains(id)).collect();
@@ -322,19 +359,7 @@ impl DiagnosisRule for ClientLocalStorageFailure {
 
             // Which storage does this client depend on, and how are its
             // neighbours faring?
-            let storages: Vec<EntityId> = context
-                .inventory
-                .graph()
-                .upstream(host.id, None)
-                .into_iter()
-                .map(|r| r.entity)
-                .filter(|id| {
-                    context
-                        .entity(*id)
-                        .map(|e| e.entity_type == EntityType::Storage)
-                        .unwrap_or(false)
-                })
-                .collect();
+            let storages = storages_used(context, host.id);
 
             if storages.is_empty() {
                 continue;
@@ -343,14 +368,7 @@ impl DiagnosisRule for ClientLocalStorageFailure {
             // A peer is a host depending on the same storage.
             let mut peers: BTreeSet<EntityId> = BTreeSet::new();
             for storage in &storages {
-                for reachable in context.inventory.graph().downstream(*storage, None) {
-                    if reachable.entity == host.id {
-                        continue;
-                    }
-                    if context.entity(reachable.entity).map(|e| e.entity_type) == Some(EntityType::Host) {
-                        peers.insert(reachable.entity);
-                    }
-                }
+                peers.extend(clients_of(context, *storage).into_iter().filter(|id| *id != host.id));
             }
 
             // With no peers there is nothing to compare against, and "only this
@@ -644,6 +662,53 @@ mod tests {
         assert!(
             world.evaluate(&StorageServiceFailure).is_empty(),
             "nobody mounts from this host, so there is nothing here to fail"
+        );
+    }
+
+    #[test]
+    fn a_client_is_only_said_to_use_the_storage_it_declares() {
+        // With the scheduler loop present, walking the graph upstream from any
+        // host reaches every storage domain in the cluster. A node that
+        // declares one mount was reported as having lost access to four, and
+        // the summary said so in as many words.
+        let world = two_domains()
+            .scheduler_on("head", &["c1", "c2", "c3", "c4"])
+            .storage("c2-scratch", "c2")
+            .uses("head", "c2-scratch")
+            .host_is_up("c3")
+            .storage_health("c3", Health::Unavailable);
+
+        let diagnoses = world.evaluate(&ClientLocalStorageFailure);
+        assert_eq!(diagnoses.len(), 1, "{diagnoses:#?}");
+
+        let summary = &diagnoses[0].summary;
+        assert!(summary.contains("storage-b"), "{summary}");
+        for other in ["storage-a", "c2-scratch"] {
+            assert!(!summary.contains(other), "c3 does not use {other}: {summary}");
+        }
+    }
+
+    #[test]
+    fn a_shared_failure_groups_by_declared_use_not_reachability() {
+        // The same loop, on the other rule. If impaired hosts were grouped by
+        // what they can reach, every one of them would share every domain with
+        // every other, and a fileserver would be named for a fault nothing to
+        // do with it.
+        let world = two_domains()
+            .scheduler_on("head", &["c1", "c2", "c3", "c4"])
+            .storage("c2-scratch", "c2")
+            .uses("head", "c2-scratch")
+            .host_is_up("c1")
+            .host_is_up("c2")
+            .storage_health("c1", Health::Unavailable)
+            .storage_health("c2", Health::Unavailable);
+
+        let diagnoses = world.evaluate(&SharedStorageFailure);
+        assert_eq!(diagnoses.len(), 1, "{diagnoses:#?}");
+        assert!(
+            diagnoses[0].summary.contains("storage-a"),
+            "c1 and c2 share storage-a and nothing else: {}",
+            diagnoses[0].summary
         );
     }
 

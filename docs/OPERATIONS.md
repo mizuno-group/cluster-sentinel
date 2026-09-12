@@ -336,19 +336,86 @@ ssh <node> sudo systemctl start sentinel-agent
 agent を止めてもジョブには影響しません。その間そのノードのローカル観測が
 止まるだけです。**本番で試せる障害はこれが上限**だと考えてください。
 
-## Maintenance window
+## 計画作業中に通知を止める（maintenance window）
 
-計画作業中の通知を抑止します。
+ディスク換装、OS 入れ替え、電源工事。**わざと落とすとき**に使います。
+これを宣言せずに作業すると、当然 Sentinel は「落ちている」と判断して
+通知します。それは誤検知ではなく、正しい観測結果です。
 
-**抑止するのは通知だけです。**
-observation・state・diagnosis は継続し、
-異常な状態が healthy に書き換えられることはありません。
-そうしなければ、作業中に発生した本物の障害が隠れ、
-いつ始まったのかを後から再構成できなくなります。
+### 作業を始めるとき
+
+```bash
+sudo -u sentinel sentinel maintenance start filesrv01 --reason "HDD 換装" --for 6h
+```
+
+これだけです。対象ノードについての通知が止まります。
+
+`--for` は省略できます。省略すると**期限なし**になり、
+`sentinel maintenance end` を打つまで続きます。
+作業がいつ終わるか分からないなら省略して構いませんが、
+**解除を忘れると本物の障害も黙ります**。
+不安なら長めの `--for 12h` を付けておくのが安全です。
+
+クラスタ全体を止める場合（全体電源工事など）は、対象を省略します。
+
+```bash
+sudo -u sentinel sentinel maintenance start --reason "電源設備の点検"
+```
+
+### 作業が終わったら
+
+```bash
+sudo -u sentinel sentinel maintenance end <id>
+```
+
+`id` は `start` が表示したものです。全部打つ必要はなく、**先頭数文字**で足ります。
+忘れたら `sentinel maintenance list` で出ます。
+
+解除した次の診断サイクルから通知が再開されます。
+**作業後もまだ壊れていれば、そこで通知が来ます。**
+作業中も判定は続いていたので、直っていないことは Sentinel 側では
+最初から分かっています。
+
+### 今抑止されているものを確認する
+
+```bash
+sudo -u sentinel sentinel maintenance list
+```
+
+`sentinel status` の末尾にも出ます。
+
+```
+⚠ notifications suppressed by maintenance: filesrv01
+  probing and diagnosis continue; end it with: sentinel maintenance end <id>
+```
+
+**この行が出ているかどうかを必ず見てください。**
+「open な CRITICAL があるのに Slack に何も来ない」という状況は、
+webhook が壊れている場合と、誰かが maintenance を宣言して忘れた場合の
+両方で同じに見えます。この行だけがその 2 つを区別します。
+
+### 抑止されるのは通知だけ
+
+probe は動き続け、state も diagnosis も更新され続けます。
+**異常な状態が healthy に書き換えられることはありません。**
+`status` にも `incident list` にも、作業中の異常はそのまま出ます。
+
+そうしている理由は 1 つです。作業中に**別の**本物の障害が始まったとき、
+記録が残っていなければ「いつ始まったのか」を後から再構成できません。
+「通知を止めたいから controller を止める」という手もありますが、
+それをやると後で必要になるその記録ごと捨てることになります。
+
+### 1 台の作業が他を黙らせないこと
 
 incident が抑止されるのは、
 **影響を受けている entity がすべて** maintenance 対象である場合のみです。
-1 台の作業が、4 台を巻き込む障害を隠すことはありません。
+
+filesrv01 を作業中に、filesrv01 と無関係な compute ノード 4 台が
+落ちた場合、その incident は抑止されません。
+共有ストレージ障害のように filesrv01 と他ノードを巻き込む incident も、
+filesrv01 だけの宣言では止まりません
+（巻き込まれた側は正常に動いているはずの機械であり、
+それが不調なら知らせるべきことだからです）。
 
 ## トラブルシューティング
 
@@ -419,6 +486,11 @@ sudo chown sentinel:sentinel /etc/sentinel/*.toml && sudo systemctl restart sent
 手当てが必要です。）
 
 ### 通知が来ない
+
+まず maintenance window を疑ってください。`sentinel status` の末尾に
+`notifications suppressed by maintenance` が出ていれば原因はそれで、
+`sentinel maintenance list` で誰がいつ何のために宣言したかが分かります。
+期限なしで宣言されたものは、解除するまで残り続けます。
 
 まず宛先そのものを試します。障害を待つ必要はありません。
 

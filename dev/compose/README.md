@@ -11,13 +11,16 @@ production は systemd + native host + 単一 `sentinel` バイナリです。
 ```text
                     controller
               Sentinel Controller
+              Sentinel Agent          ← controller host も監視対象
                     slurmctld
+              storage service (export ゼロ)
                         │
         ┌───────────────┼───────────────┐
         │               │               │
     compute01       compute02       compute03
     sentinel        sentinel        sentinel
       slurmd          slurmd          slurmd
+                  storage service
         │               │               │
         └───────── peer monitoring ─────┘
 
@@ -26,19 +29,50 @@ production は systemd + native host + 単一 `sentinel` バイナリです。
         storage service     storage service
 ```
 
-依存関係（storage domain を 2 つに分けてある理由）:
+依存関係（storage domain を分けてある理由）:
 
 ```text
 compute01 ─┐
 compute02 ─┴──→ storage01 ──→ filesrv01
 
 compute03 ─────→ storage02 ──→ filesrv02
+
+controller ────→ compute02-scratch ──→ compute02
 ```
 
 storage01 を壊せば 2 client が同時に劣化し（`SHARED_STORAGE_FAILURE`）、
 compute01 だけを storage から切り離せば 1 client のみが劣化します
 （`NFS_CLIENT_FAILURE`）。
 **この 2 つを取り違えないこと** が storage 診断の要件です。
+
+## 実クラスタの形に寄せてある 3 点
+
+単純な構成では見つからない欠陥が 3 つ続けて実機で出たため、
+次を意図的に入れてあります。**どれも実クラスタでは当たり前の構成です。**
+
+**controller host が agent も動かす。**
+設定ファイルのパスを分けて共存させています（`sentinel install agent --config`
+が production で作るのと同じ分け方）。この host は内側からも監視され、
+peer の監視対象でもあります。controller は自分自身に probe を打たないので、
+**この形でしか現れない穴があります。**
+
+**compute02 がストレージも提供する。**
+これにより依存グラフに閉路ができます。
+
+```text
+storage/compute02-scratch → host/compute02 → scheduler → slurmctld
+                          → host/controller → storage/compute02-scratch
+```
+
+**どの host から推移的に辿っても、全 host に到達します。**
+「この host が提供するものを誰かが使っているか」「この client はどの storage を
+使っているか」をグラフの到達可能性で答えるルールは、ここで破綻します。
+実際に破綻して、head node に誤った critical が出ました。
+
+**controller の export port が応答し、export はゼロ。**
+NFS サーバのパッケージが入っているだけの host の形です。
+`/etc/exports` があるので capability は検出され、サービスは port に応答し、
+しかし誰もそこからマウントしていません。**誤検知の常連です。**
 
 fileserver には Slurm を入れていません。
 Slurm の外にある host も同等に監視できることを示すためです（`SPEC.md` §180）。

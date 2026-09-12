@@ -11,6 +11,7 @@ use serde::Serialize;
 use crate::entity::{EntityId, EntityType, LifecycleState, ManagedEntity};
 use crate::incident::Incident;
 use crate::inventory::Inventory;
+use crate::notification::MaintenanceWindow;
 use crate::persistence::SqliteStore;
 use crate::state::{EntityState, Health};
 
@@ -108,6 +109,16 @@ pub struct StatusReport {
     /// pinned to the version already installed.
     #[serde(default)]
     pub agent_versions: BTreeMap<String, usize>,
+    /// Entities whose notifications are currently suppressed by a maintenance
+    /// window, by name.
+    ///
+    /// Shown because suppression is otherwise invisible: an operator looking at
+    /// an open CRITICAL and no Slack message has no way to tell "the webhook is
+    /// broken" from "somebody declared maintenance on Tuesday and forgot". An
+    /// open-ended window is easy to forget, and forgetting it is the failure
+    /// mode that matters.
+    #[serde(default)]
+    pub maintenance: Vec<String>,
     /// Count per health value.
     pub totals: BTreeMap<String, usize>,
 }
@@ -146,6 +157,7 @@ impl StatusReport {
             entities,
             incidents: Vec::new(),
             silent_probes: None,
+            maintenance: Vec::new(),
             agent_versions,
             totals,
         }
@@ -154,6 +166,24 @@ impl StatusReport {
     /// Builder: attach the one-line probe audit summary.
     pub fn with_silent_probes(mut self, summary: Option<String>) -> Self {
         self.silent_probes = summary;
+        self
+    }
+
+    /// Builder: attach the entities currently under maintenance.
+    pub fn with_maintenance(mut self, windows: &[MaintenanceWindow], inventory: &Inventory) -> Self {
+        let at = crate::time::now();
+        let environment = self.environment.clone();
+        self.maintenance = windows
+            .iter()
+            .filter(|w| w.is_active_at(at))
+            .map(|w| match w.entity {
+                Some(id) => inventory
+                    .get(id)
+                    .map(|e| e.canonical_name.clone())
+                    .unwrap_or_else(|| id.to_string()),
+                None => format!("(all of {environment})"),
+            })
+            .collect();
         self
     }
 
@@ -294,8 +324,11 @@ pub async fn load_report_with(
         None => None,
     };
 
+    let maintenance = store.load_maintenance_windows(environment).await?;
+
     Ok(StatusReport::build(environment, &inventory, &states)
         .with_incidents(&incidents, &inventory)
+        .with_maintenance(&maintenance, &inventory)
         .with_silent_probes(silent))
 }
 
@@ -372,7 +405,15 @@ pub fn render(report: &StatusReport) -> String {
             .iter()
             .map(|(version, count)| format!("{version} ({count})"))
             .collect();
-        out.push_str(&format!("\nagent のバージョンが混在: {}\n", versions.join(", ")));
+        out.push_str(&format!("\nagent versions differ: {}\n", versions.join(", ")));
+    }
+
+    if !report.maintenance.is_empty() {
+        out.push_str(&format!(
+            "\n\u{26a0} notifications suppressed by maintenance: {}\n",
+            report.maintenance.join(", ")
+        ));
+        out.push_str("  probing and diagnosis continue; end it with: sentinel maintenance end <id>\n");
     }
 
     if let Some(silence) = &report.silent_probes {
@@ -494,6 +535,7 @@ mod tests {
     use super::*;
     use crate::capability::CapabilitySet;
     use crate::entity::EntityId;
+    use crate::entity::EntityKey;
     use crate::state::{classification, ComponentState, StateComponent};
 
     fn inventory_with(entities: Vec<ManagedEntity>) -> Inventory {
@@ -578,6 +620,29 @@ mod tests {
 
         let order: Vec<&str> = report.entities.iter().map(|e| e.entity_type.as_str()).collect();
         assert_eq!(order, ["scheduler", "storage", "host", "service"]);
+    }
+
+    #[test]
+    fn an_active_maintenance_window_is_visible_in_status() {
+        // Otherwise suppression has no visible cause: an open CRITICAL with no
+        // Slack message reads as a broken webhook.
+        let inventory = inventory_with(vec![ManagedEntity::new("lab", EntityType::Host, "fs1")]);
+        let windows = vec![MaintenanceWindow::for_entity(
+            EntityKey::new("lab", EntityType::Host, "fs1").entity_id(),
+            "disk swap",
+        )];
+        let mut report =
+            StatusReport::build("lab", &inventory, &BTreeMap::new()).with_maintenance(&windows, &inventory);
+        let text = render(&report);
+        assert!(text.contains("suppressed by maintenance"), "{text}");
+        assert!(text.contains("fs1"), "{text}");
+        assert!(text.contains("maintenance end"), "how to undo it: {text}");
+
+        report.maintenance.clear();
+        assert!(
+            !render(&report).contains("suppressed by maintenance"),
+            "silent when nothing applies"
+        );
     }
 
     #[test]

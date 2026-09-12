@@ -47,10 +47,14 @@ services:
     environment:
       <<: *common-env
       SENTINEL_ROLE: controller
+      # The head node shape: the server package is installed and the service
+      # answers, and nothing is exported. See scripts/entrypoint.
+      SENTINEL_EXPORTS: empty
     volumes:
       - ./config/slurm/slurm.conf:/etc/slurm/slurm.conf:ro
       - ./config/slurm/cgroup.conf:/etc/slurm/cgroup.conf:ro
       - ./config/sentinel/controller.toml:/etc/sentinel/config.toml:ro
+      - ./config/sentinel/controller-agent.toml:/etc/sentinel/agent.toml:ro
       - munge-key:/etc/munge-shared:ro
       - controller-state:/var/lib/sentinel
     ports:
@@ -60,7 +64,14 @@ services:
       munge-init:
         condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:7443/v1/health"]
+      # Both daemons this container runs. Waiting only for the API declared the
+      # container ready before its export service was listening, and the first
+      # diagnosis after startup then reported a storage fault that resolved
+      # itself seconds later. A readiness check has to cover what the container
+      # actually runs.
+      test:
+        - CMD-SHELL
+        - curl -fsS http://localhost:7443/v1/health && curl -fsS http://localhost:2050/
       interval: 5s
       timeout: 3s
       retries: 12
@@ -92,10 +103,35 @@ services:
       retries: 12
       start_period: 15s
 
+  # A compute node that also serves storage, which is ordinary on a real
+  # cluster and was missing here. It is what closes the loop in the dependency
+  # graph -- storage provided by a host that depends on the scheduler, which is
+  # hosted on the machine that mounts that storage -- and that loop is what a
+  # rule asking the graph transitively walks straight into.
+  #
+  # On compute02 rather than compute03 because the scenarios must stay
+  # independent: compute03 is the one `stop-host` kills, and a node carrying an
+  # extra service takes longer to be declared unreachable -- every observer has
+  # one more probe to wait out. That is real behaviour, but it belongs in its
+  # own test rather than folded into the quorum one.
   compute02:
     <<: *compute
     container_name: sentinel-compute02
     hostname: compute02
+    environment:
+      <<: *common-env
+      SENTINEL_ROLE: compute-storage
+      SENTINEL_EXPORTS: full
+    healthcheck:
+      # slurmd *and* the export service: this node runs both, and the baseline
+      # check after startup sees whatever is not ready yet as a fault.
+      test:
+        - CMD-SHELL
+        - supervisorctl -c /etc/supervisor/roles/compute-storage.conf status slurmd | grep -q RUNNING && curl -fsS http://localhost:2050/
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
 
   compute03:
     <<: *compute
@@ -109,6 +145,7 @@ services:
     environment:
       <<: *common-env
       SENTINEL_ROLE: fileserver
+      SENTINEL_EXPORTS: full
     volumes:
       - ./config/sentinel/agent.toml:/etc/sentinel/config.toml:ro
       - munge-key:/etc/munge-shared:ro

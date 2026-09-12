@@ -212,6 +212,34 @@ async fn retention_loop(controller: Arc<Mutex<Controller>>, config: RetentionCon
     }
 }
 
+/// The maintenance windows in force, as the diagnosis loop sees them.
+///
+/// Read every pass rather than once at startup, so a window declared while the
+/// controller is running takes effect on the next tick. An operator who has
+/// just started pulling disks out of a machine should not have to restart the
+/// monitor to stop being paged about it.
+///
+/// A function rather than three lines inline because this is the step that was
+/// missing: the loop used to construct an empty set here, which made every
+/// window anyone might declare unreachable. Naming it gives the wiring
+/// somewhere to be tested.
+async fn active_maintenance(controller: &Controller) -> MaintenanceWindows {
+    match controller
+        .store()
+        .load_maintenance_windows(&controller.config().environment)
+        .await
+    {
+        Ok(windows) => MaintenanceWindows::from_windows(windows),
+        // Failing open: not reading the windows means notifying during planned
+        // work, which is noise. Failing closed would mean silence during a real
+        // outage, which is the one outcome a monitor must never produce.
+        Err(error) => {
+            tracing::warn!(%error, "cannot read maintenance windows; notifying as usual");
+            MaintenanceWindows::new()
+        }
+    }
+}
+
 /// Diagnose, correlate and notify on a schedule.
 ///
 /// Reads only what is already stored, so it is cheap enough to run often. This
@@ -271,7 +299,7 @@ async fn diagnosis_loop(
             continue;
         }
 
-        let maintenance = MaintenanceWindows::new();
+        let maintenance = active_maintenance(&controller).await;
         match controller
             .notify(&update, &providers, &mut deduplicator, &maintenance)
             .await
@@ -343,6 +371,37 @@ mod tests {
     use crate::protocol::{RegisterRequest, API_PREFIX};
 
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+
+    #[tokio::test]
+    async fn the_diagnosis_loop_reads_the_windows_an_operator_declared() {
+        // The step that did not exist. `sentinel maintenance start` writes a
+        // row; without this read, the row was inert and the suppression branch
+        // in `notify` could never be taken in a real controller.
+        let config = Config {
+            config_version: 1,
+            environment: "lab".into(),
+            ..Config::default()
+        };
+        let store = SqliteStore::open_in_memory().await.expect("store");
+        let controller = Controller::new(config, store).await.expect("controller");
+
+        assert!(
+            active_maintenance(&controller).await.is_empty(),
+            "nothing declared, nothing suppressed"
+        );
+
+        controller
+            .store()
+            .save_maintenance_window("lab", &crate::notification::MaintenanceWindow::for_environment("work"))
+            .await
+            .expect("save");
+
+        assert_eq!(
+            active_maintenance(&controller).await.len(),
+            1,
+            "the loop did not see a declared window"
+        );
+    }
 
     async fn start(discovery_interval: Option<std::time::Duration>) -> ServerHandle {
         let config = Config {

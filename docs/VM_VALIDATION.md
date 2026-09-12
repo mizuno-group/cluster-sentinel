@@ -127,7 +127,7 @@ Docker / VM で代替できるものはそちらで行ってください。
 | --- | --- | --- |
 | 1 | unit / mock | 自動化済み・CI 実行可能 |
 | 2 | in-process simulation | 自動化済み・CI 実行可能 |
-| 3 | Docker 疑似クラスタ | 自動化済み（`dev/compose/scripts/acceptance`、23 項目）。cgroup は v2 実階層だが scope 作成は systemd 経由ではない |
+| 3 | Docker 疑似クラスタ | 自動化済み（`dev/compose/scripts/acceptance`、26 項目）。**実クラスタの形に寄せてある** — controller host が agent を持ち、計算ノードの 1 台がストレージも提供し、head node は export ゼロで export port に応答する。cgroup は v2 実階層だが scope 作成は systemd 経由ではない |
 | 4 | VM / 実機 | **一部実施**。下記の通り |
 
 ### 実機で確認できたこと

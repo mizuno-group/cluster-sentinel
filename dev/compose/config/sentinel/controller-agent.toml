@@ -1,0 +1,29 @@
+# The agent that runs beside the controller, on the controller's own host.
+#
+# A separate configuration path from the controller's, which is what
+# `sentinel install agent --config /etc/sentinel/agent.toml` produces in
+# production: the two daemons share a binary and a credential but not a
+# configuration, and installing one must not overwrite the other's.
+#
+# This container exists because its absence cost two releases. A head node with
+# an agent is monitored from inside as well as watched from outside, and it is
+# a peer's target as well as the controller's own host -- a shape no other
+# container here has.
+
+config_version = 1
+environment = "testbed"
+
+[agent]
+# Its own controller is next door. Named rather than 127.0.0.1 so the address
+# the agent registers is the one peers can reach it at.
+controller_address = "controller:7443"
+spool_path = "/var/lib/sentinel/agent-spool.db"
+
+[database]
+path = "/var/lib/sentinel/agent.db"
+
+# Deliberately *not* an observer, unlike every other container here. The head
+# node of the cluster this was modelled on is not one either, and the
+# difference matters: the controller already declines to probe its own host, so
+# a head node that is nobody's peer target is a host nothing watches. That is
+# worth having in the testbed rather than assuming away.

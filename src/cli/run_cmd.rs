@@ -1091,7 +1091,7 @@ mod tests {
 
         assert_eq!(report.agent_versions.len(), 2, "{:?}", report.agent_versions);
         let rendered = status_cmd::render(&report);
-        assert!(rendered.contains("バージョンが混在"), "{rendered}");
+        assert!(rendered.contains("agent versions differ"), "{rendered}");
         assert!(rendered.contains("0.3.22") && rendered.contains("0.3.23"), "{rendered}");
     }
 
@@ -1109,7 +1109,7 @@ mod tests {
         let report = status_cmd::load_report(&store, "lab").await.expect("report");
         store.close().await;
 
-        assert!(!status_cmd::render(&report).contains("バージョンが混在"));
+        assert!(!status_cmd::render(&report).contains("agent versions differ"));
     }
 
     #[tokio::test]

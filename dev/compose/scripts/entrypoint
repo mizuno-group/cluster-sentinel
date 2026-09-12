@@ -43,18 +43,40 @@ if [[ -w /sys/fs/cgroup ]]; then
     mkdir -p /sys/fs/cgroup/system.slice
 fi
 
-# --- storage role ----------------------------------------------------------
+# --- storage ---------------------------------------------------------------
 # A real export list. The storage service reads it, and Sentinel's capability
 # discovery detects `storage.nfs.server` from it exactly as it would on a real
 # fileserver -- the capability is discovered, not declared.
-if [[ "${ROLE}" == "fileserver" && ! -f /etc/exports ]]; then
-    cat > /etc/exports <<'EXPORTS'
+#
+# SENTINEL_EXPORTS says which of the two shapes this container has:
+#
+#   full   a machine that serves storage
+#   empty  a machine with the server package installed and nothing exported.
+#          Ordinary for a host used as a client -- and the exact state that
+#          produced a false critical on a real cluster, because the service
+#          still answers on the port. The capability is discovered here too,
+#          which is the point: it comes from the package being present, not
+#          from anything being served.
+case "${SENTINEL_EXPORTS:-none}" in
+full)
+    if [[ ! -f /etc/exports ]]; then
+        cat > /etc/exports <<'EXPORTS'
 # Exported by the Sentinel pseudo-cluster storage service.
 /export/home    *(rw,sync,no_subtree_check)
 /export/scratch *(rw,async,no_subtree_check)
 EXPORTS
-    mkdir -p /export/home /export/scratch
-fi
+        mkdir -p /export/home /export/scratch
+    fi
+    ;;
+empty)
+    if [[ ! -f /etc/exports ]]; then
+        cat > /etc/exports <<'EXPORTS'
+# /etc/exports: the access control list for filesystems which may be
+# exported to NFS clients.  Nothing is exported from this host.
+EXPORTS
+    fi
+    ;;
+esac
 
 # --- sentinel --------------------------------------------------------------
 mkdir -p /var/lib/sentinel /run/sentinel

@@ -282,6 +282,22 @@ sudo -u sentinel sentinel notify test
 通知は**状態が変わったときだけ**飛びます。続いている障害を
 繰り返し通知することはありません。復旧時にも届きます。
 
+### わざと落とすときは先に宣言する
+
+ディスク換装や電源工事のように、自分で止めると分かっているときは、
+作業前にそう言っておけば通知が来ません。
+
+```bash
+sudo -u sentinel sentinel maintenance start <node> --reason "HDD 換装" --for 6h
+```
+
+作業が終わったら `sentinel maintenance end <id>` で解除します
+（`id` は上のコマンドが表示します。先頭数文字で足ります）。
+
+止めるのは**通知だけ**です。検査と判定は続いているので、
+作業中に別の本物の障害が始まっていれば、後から記録を追えます。
+詳しくは [OPERATIONS.md](OPERATIONS.md#計画作業中に通知を止めるmaintenance-window)。
+
 ---
 
 ## 8. 最初につまずきやすいところ
@@ -302,6 +318,11 @@ sudo -u sentinel sentinel notify test
 **ストレージの依存関係を書かないといけない?**
 : **不要です。** agent が報告するマウント表から自動的に組み立てられます。
   ノードがマウント先を変えても設定ファイルを触る必要はありません。
+
+**通知が来ない**
+: まず `sentinel status` の末尾を見てください。`notifications suppressed by maintenance`
+  が出ていれば、期限なしの maintenance window が残っています。
+  `sentinel maintenance list` で確認して `end` で解除します。
 
 **あるノードだけ `UNKNOWN` のまま**
 : そのノードの agent が登録できていません。ノード側で

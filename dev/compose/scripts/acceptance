@@ -24,6 +24,17 @@ step()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 pass()  { printf '   \033[32mPASS\033[0m %s\n' "$*"; PASSED=$((PASSED + 1)); }
 fail()  { printf '   \033[31mFAIL\033[0m %s\n' "$*"; FAILED=$((FAILED + 1)); FAILURES+=("$*"); }
 
+# Output of a sentinel command, with its exit code deliberately discarded.
+#
+# `status` and `incident list` exit 2 whenever they have something to report,
+# and this script runs under `pipefail`, so
+#
+#     sentinel status | grep -q "x"
+#
+# fails even when "x" is present -- a check that can never pass, whatever the
+# product does. Always capture first, then match.
+say() { ./scripts/sentinel "$@" 2>/dev/null || true; }
+
 diagnoses() {
     ./scripts/sentinel diagnose --json 2>/dev/null |
         python3 -c 'import json,sys
@@ -133,6 +144,81 @@ expect_diagnosis SLURM_ONLY_DEGRADATION
 expect_no_diagnosis SLURMD_SERVICE_FAILURE
 recover && expect_clean
 
+# --- the head node, which serves nothing -----------------------------------
+# The controller's host has the export service answering on 2049 with an empty
+# export list, and an agent beside the controller. That is the ordinary shape
+# of a head node, and it produced a false critical on a real cluster twice:
+# once because an empty export list was treated as a fault on its own, and once
+# because "does anyone use what this host serves" was asked of the dependency
+# graph transitively, which walks the scheduler loop back round to every host.
+step "Head node serves nothing, and is not accused of failing at it"
+if grep -q "controller is up but" <<<"$(say diagnose)"; then
+    fail "the head node was diagnosed for exporting nothing"
+else
+    pass "a host nobody mounts from is not a failing fileserver"
+fi
+if grep -q "connected" <<<"$(say entity observations host/controller --probe nfs.server.port)"; then
+    pass "and its export port really is answering, so the case is live"
+else
+    fail "the head node's export port is not being probed; this check proves nothing"
+fi
+
+# --- the monitoring has no holes -------------------------------------------
+step "Every probe that applies is reporting"
+if ./scripts/sentinel audit > /dev/null 2>&1; then
+    pass "sentinel audit is clean"
+else
+    fail "sentinel audit found probes that should be reporting and are not"
+    ./scripts/sentinel audit 2>&1 | sed 's/^/      /'
+fi
+
+# --- planned work does not page anyone --------------------------------------
+# The window type, its rules and its table were all present from the first
+# migration, and the diagnosis loop constructed an empty set of windows on
+# every pass. Nothing could write one and nothing ever read one, so swapping a
+# fileserver paged whoever was on the webhook for as long as the work took.
+#
+# What this proves that the unit tests cannot: the CLI writes the row while the
+# controller holds the same database open, and suppression does not hide state.
+step "Planned maintenance suppresses notification and nothing else"
+if ./scripts/sentinel maintenance start compute01 --reason "acceptance" --for 1h >/dev/null 2>&1; then
+    pass "a maintenance window can be declared against a live controller"
+else
+    fail "sentinel maintenance start failed"
+fi
+if grep -q "suppressed by maintenance" <<<"$(say status)"; then
+    pass "status says notifications are being suppressed, and on what"
+else
+    fail "suppression is invisible in status; an operator cannot tell it from a broken webhook"
+fi
+
+./scenarios/stop-slurmd compute01 >/dev/null 2>&1
+sleep "${SLURM_SETTLE}"
+expect_diagnosis SLURMD_SERVICE_FAILURE "${SLURM_SETTLE}"
+if grep -qi "compute01" <<<"$(say incident list)"; then
+    pass "the incident is still opened and still visible during maintenance"
+else
+    fail "maintenance hid the incident; a fault starting during the work would be unrecoverable"
+fi
+recover && expect_clean
+
+MAINT_ID=$(say maintenance list --json |
+    python3 -c 'import json,sys
+try:
+    print(json.load(sys.stdin)["windows"][0]["id"])
+except Exception:
+    print("")' 2>/dev/null || echo "")
+if [[ -n "${MAINT_ID}" ]] && ./scripts/sentinel maintenance end "${MAINT_ID}" >/dev/null 2>&1; then
+    pass "the window can be ended again"
+else
+    fail "the maintenance window could not be ended"
+fi
+if grep -q "suppressed by maintenance" <<<"$(say status)"; then
+    fail "status still reports suppression after the window ended"
+else
+    pass "and status stops reporting suppression"
+fi
+
 # --- 12-13: path-specific network failure ----------------------------------
 step "12-13. controller isolated from compute01 only"
 ./scenarios/isolate controller compute01 >/dev/null 2>&1
@@ -146,7 +232,7 @@ step "Host stopped entirely (quorum)"
 ./scenarios/stop-host compute03 >/dev/null 2>&1
 sleep "${SETTLE}"
 expect_diagnosis HOST_UNREACHABLE
-if ./scripts/sentinel diagnose 2>/dev/null | grep -qi "power"; then
+if grep -qi "power" <<<"$(say diagnose)"; then
     fail "a power state was claimed from network evidence"
 else
     pass "no power state claimed (SPEC.md §52)"

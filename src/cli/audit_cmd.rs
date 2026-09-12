@@ -8,8 +8,17 @@
 
 use crate::audit::{silence_horizon, Finding};
 use crate::config::Config;
+use crate::notification::MaintenanceWindow;
 
 use super::{run_cmd::open_store, Cli};
+
+/// How long an open-ended maintenance window may stand before the audit treats
+/// it as forgotten.
+///
+/// Longer than any single session at a rack, short enough that a window left
+/// over from yesterday's work is caught before it eats a real outage. A window
+/// with an end time is never reported, however old, because it closes itself.
+const STALE_MAINTENANCE_HOURS: i64 = 24;
 
 /// `sentinel audit`.
 pub async fn audit(cli: &Cli, json: bool) -> anyhow::Result<i32> {
@@ -20,16 +29,90 @@ pub async fn audit(cli: &Cli, json: bool) -> anyhow::Result<i32> {
     let observed = crate::audit::observed_entities(&inventory, &config);
     let findings = crate::audit::silent_probes(&inventory, &config, &observed, &last_seen, crate::time::now());
 
+    // A maintenance window nobody closed is the same class of defect as a probe
+    // nobody runs: the monitoring is intact and its output goes nowhere. It
+    // belongs here rather than only in `status` because this is the command
+    // that runs unattended, and being forgotten is the whole failure mode.
+    let windows = store.load_maintenance_windows(&config.environment).await?;
+    let forgotten = forgotten_maintenance(&windows, crate::time::now());
+    let named: Vec<(String, String)> = forgotten
+        .iter()
+        .map(|w| {
+            let what = match w.entity {
+                Some(id) => inventory
+                    .get(id)
+                    .map(|e| e.canonical_name.clone())
+                    .unwrap_or_else(|| id.to_string()),
+                None => format!("(all of {})", config.environment),
+            };
+            (what, w.reason.clone())
+        })
+        .collect();
+
     if json {
-        println!("{}", serde_json::to_string_pretty(&as_json(&findings))?);
+        let mut value = as_json(&findings);
+        value["forgotten_maintenance"] = serde_json::json!(forgotten
+            .iter()
+            .map(|w| serde_json::json!({
+                "id": w.id,
+                "entity": w.entity.map(|id| id.to_string()),
+                "reason": w.reason,
+                "started_at": crate::time::to_rfc3339(w.starts_at),
+            }))
+            .collect::<Vec<_>>());
+        println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         print!("{}", render(&findings));
+        print!("{}", render_maintenance(&named, &forgotten));
     }
 
     // Non-zero so this can sit in cron or CI. A probe that is not running is a
     // hole in the monitoring, and a hole in the monitoring is worth the same
     // attention as a fault it would have found.
-    Ok(if findings.is_empty() { 0 } else { 2 })
+    Ok(if findings.is_empty() && forgotten.is_empty() {
+        0
+    } else {
+        2
+    })
+}
+
+/// Open-ended maintenance windows old enough to look forgotten.
+fn forgotten_maintenance(windows: &[MaintenanceWindow], now: crate::time::Timestamp) -> Vec<&MaintenanceWindow> {
+    let cutoff = now - chrono::Duration::hours(STALE_MAINTENANCE_HOURS);
+    windows
+        .iter()
+        .filter(|w| w.is_active_at(now) && w.ends_at.is_none() && w.starts_at < cutoff)
+        .collect()
+}
+
+/// Report windows that are suppressing notifications with no end in sight.
+fn render_maintenance(named: &[(String, String)], windows: &[&MaintenanceWindow]) -> String {
+    if named.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from("\nMAINTENANCE STILL SUPPRESSING NOTIFICATIONS\n");
+    out.push_str(&"\u{2500}".repeat(100));
+    out.push('\n');
+    out.push_str(&format!(
+        "\nDeclared more than {STALE_MAINTENANCE_HOURS}h ago with no end time. Until each is ended,\n         faults affecting it are diagnosed and recorded but never announced.\n\n"
+    ));
+
+    for ((what, reason), window) in named.iter().zip(windows) {
+        out.push_str(&format!("  {what}\n"));
+        out.push_str(&format!("    reason  {reason}\n"));
+        out.push_str(&format!(
+            "    since   {}{}\n",
+            crate::time::to_rfc3339(window.starts_at),
+            match &window.created_by {
+                Some(who) => format!(" by {who}"),
+                None => String::new(),
+            }
+        ));
+        out.push_str(&format!("    end it  sentinel maintenance end {}\n", window.id));
+    }
+
+    out
 }
 
 fn as_json(findings: &[Finding]) -> serde_json::Value {
@@ -133,6 +216,49 @@ mod tests {
             interval: Duration::from_secs(60),
             last_seen,
         }
+    }
+
+    fn window(hours_ago: i64, ends: bool) -> MaintenanceWindow {
+        let started = crate::time::now() - chrono::Duration::hours(hours_ago);
+        let w = MaintenanceWindow::for_entity(EntityKey::new("lab", EntityType::Host, "fs1").entity_id(), "disk swap")
+            .from(started);
+        if ends {
+            w.until(started + chrono::Duration::hours(2))
+        } else {
+            w
+        }
+    }
+
+    #[test]
+    fn a_maintenance_window_left_open_for_a_day_is_reported() {
+        // The failure mode: somebody declares a window for an afternoon's work,
+        // the work ends, the window does not, and a real outage next week is
+        // diagnosed and silently dropped.
+        let windows = vec![window(30, false)];
+        let forgotten = forgotten_maintenance(&windows, crate::time::now());
+        assert_eq!(forgotten.len(), 1);
+
+        let text = render_maintenance(&[("fs1".into(), "disk swap".into())], &forgotten);
+        assert!(text.contains("STILL SUPPRESSING"), "{text}");
+        assert!(text.contains("sentinel maintenance end"), "{text}");
+    }
+
+    #[test]
+    fn a_window_declared_this_morning_is_not_yet_a_problem() {
+        let windows = vec![window(3, false)];
+        assert!(forgotten_maintenance(&windows, crate::time::now()).is_empty());
+    }
+
+    #[test]
+    fn a_window_with_an_end_time_is_never_reported() {
+        // It closes itself, so it cannot be forgotten however old it is.
+        let windows = vec![window(500, true)];
+        assert!(forgotten_maintenance(&windows, crate::time::now()).is_empty());
+    }
+
+    #[test]
+    fn nothing_forgotten_prints_nothing() {
+        assert!(render_maintenance(&[], &[]).is_empty());
     }
 
     #[test]

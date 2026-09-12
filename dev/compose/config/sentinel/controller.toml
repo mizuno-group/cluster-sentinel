@@ -73,3 +73,34 @@ type = "uses_storage"
 from = "host/compute03"
 to = "storage/storage02"
 type = "uses_storage"
+
+# ---------------------------------------------------------------------------
+# A compute node that also serves storage, and the head node that mounts it.
+#
+# This exists to close a loop in the dependency graph that no simpler shape
+# has, and that a real cluster has by default:
+#
+#   storage/compute02-scratch -> host/compute02      (provides)
+#   host/compute02            -> scheduler/slurm     (uses_scheduler, from Slurm)
+#   scheduler/slurm           -> service/slurmctld   (provides, from Slurm)
+#   service/slurmctld         -> host/controller     (hosted_on, from Slurm)
+#   host/controller           -> storage/compute02-scratch  (uses_storage)
+#
+# Walk that transitively from any host and you arrive at every host. A rule
+# that asked "does anyone use what this host serves" by reachability therefore
+# answered yes for the head node, which exports nothing, and put a critical on
+# it. The loop belongs here so the next such rule is tested against it.
+# ---------------------------------------------------------------------------
+[[entities]]
+type = "storage"
+name = "compute02-scratch"
+
+[[dependencies]]
+from = "storage/compute02-scratch"
+to = "host/compute02"
+type = "provides"
+
+[[dependencies]]
+from = "host/controller"
+to = "storage/compute02-scratch"
+type = "uses_storage"

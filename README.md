@@ -80,6 +80,7 @@ sentinel explain                  # 何をどうやって見張っているの�
 sentinel audit                    # 動いているはずの検査が動いているか
 sentinel entity observations <n>  # その判断の元になった生の観測
 sentinel notify test              # 通知先に実際に届くか
+sentinel maintenance start <n>    # 計画作業中の通知を止める
 ```
 
 **一覧と使い分けは [docs/COMMANDS.md](docs/COMMANDS.md)** にまとめてあります。
@@ -104,7 +105,7 @@ sentinel notify test              # 通知先に実際に届くか
 
 ## 動作確認
 
-Docker の疑似クラスタに対して、受け入れ項目 23 件が自動で走ります。
+Docker の疑似クラスタに対して、受け入れ項目 33 件が自動で走ります。
 
 ```bash
 cd dev/compose && ./scripts/acceptance

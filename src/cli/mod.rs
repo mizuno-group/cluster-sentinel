@@ -5,6 +5,7 @@
 
 pub mod audit_cmd;
 pub mod explain_cmd;
+pub mod maintenance_cmd;
 
 /// Re-exported so tests can render the views without going through the CLI.
 pub use explain_cmd as explain;
@@ -181,6 +182,17 @@ pub enum Command {
         #[command(subcommand)]
         command: NotifyCommand,
     },
+    /// Declare planned work, so it does not page anyone.
+    ///
+    /// Suppresses **notification only**: probes keep running, state keeps
+    /// changing and diagnosis keeps concluding, so the record of what happened
+    /// during the work stays complete. The alternative — stopping the
+    /// controller — throws away exactly the history the post-mortem needs.
+    Maintenance {
+        /// The maintenance subcommand.
+        #[command(subcommand)]
+        command: MaintenanceCommand,
+    },
     /// Report what this host looks like to Sentinel, and why.
     Doctor {
         /// Emit JSON instead of text.
@@ -282,6 +294,42 @@ pub enum DependencyCommand {
 }
 
 /// `sentinel config ...`.
+/// `sentinel maintenance ...`.
+#[derive(Debug, Subcommand)]
+pub enum MaintenanceCommand {
+    /// Start a maintenance window.
+    Start {
+        /// The entity under maintenance. The whole environment when omitted.
+        target: Option<String>,
+        /// Why, for the record. It is shown when the window is listed.
+        #[arg(long)]
+        reason: String,
+        /// How long, e.g. `4h`. Open-ended when omitted.
+        #[arg(long = "for", value_name = "DURATION")]
+        duration: Option<String>,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List maintenance windows.
+    List {
+        /// Include windows that have already ended.
+        #[arg(long)]
+        all: bool,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+    /// End a maintenance window now, so notifications resume.
+    End {
+        /// The window id, or enough of its start to be unambiguous.
+        id: String,
+        /// Emit JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
     /// Validate the configuration file.
@@ -358,6 +406,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<i32> {
                 notify_cmd::test(&cli, provider.as_deref(), severity.as_deref()).await
             }
         },
+        Command::Maintenance { command } => maintenance_cmd::run(&cli, command).await,
         Command::Doctor { json } => daemon_cmd::doctor(&cli, *json).await,
     }
 }

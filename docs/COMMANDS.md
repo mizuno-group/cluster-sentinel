@@ -24,6 +24,8 @@
 | 依存関係のグラフ | `sentinel dependency list` |
 | このホストが Sentinel からどう見えるか | `sentinel doctor` |
 | 通知が実際に届くか試す | `sentinel notify test` |
+| **計画作業中の通知を止める** | `sentinel maintenance start <name> --reason <理由>` |
+| 止めているものを確認する / 解除する | `sentinel maintenance list` / `end <id>` |
 | 設定が正しいか確かめる | `sentinel config check` |
 | 設定の実効値と、その出どころ | `sentinel config show` |
 | 導入する（設定・unit・credential を生成） | `sentinel install controller` / `agent` |
@@ -389,6 +391,65 @@ sudo -u sentinel sentinel notify test
 
 URL の打ち間違いを障害の最中に知るのが最悪なので、設定したら必ず
 一度実行してください。
+
+---
+
+## 計画作業
+
+### `sentinel maintenance start [<name>] --reason <理由>`
+
+計画作業中の通知を止めます。**わざと落とすとき**に使うものです。
+
+```bash
+sudo -u sentinel sentinel maintenance start filesrv01 --reason "HDD 換装" --for 6h
+```
+
+| 引数 / オプション | 意味 |
+| --- | --- |
+| `<name>` | 対象。`host/filesrv01` のように型を付けて曖昧さを消せます。**省略すると環境全体** |
+| `--reason <TEXT>` | 必須。`list` に表示されるので、後から見て分かる言葉で |
+| `--for <DURATION>` | `6h`、`30m`、`2d` など。**省略すると期限なし** |
+
+**抑止されるのは通知だけです。** probe は動き続け、state も diagnosis も
+更新され続けます。`status` にも `incident list` にも、作業中の異常はそのまま
+出ます。作業中に別の本物の障害が始まったとき、その記録がなければ
+いつ始まったのか後から分からなくなるためです。
+
+incident が抑止されるのは、**影響を受けている entity がすべて**
+maintenance 対象である場合のみです。1 台の作業が、4 台を巻き込む障害を
+隠すことはありません。
+
+> **`--for` を省略したら、解除を忘れないこと。**
+> 期限なしの window は `end` を打つまで残り、本物の障害も黙ります。
+> `sentinel status` の末尾に出るので、日々の確認で気付けるようにはなっています。
+
+### `sentinel maintenance list`
+
+今抑止されているものを表示します。
+
+```bash
+sudo -u sentinel sentinel maintenance list
+```
+
+| オプション | 意味 |
+| --- | --- |
+| `--all` | 終了済みのものも含める |
+
+終了済みの window も記録として残ります（消しません）。
+「あの日なぜ通知が来なかったのか」を後から説明できるようにするためです。
+
+### `sentinel maintenance end <id>`
+
+解除します。次の診断サイクルから通知が再開されます。
+
+```bash
+sudo -u sentinel sentinel maintenance end 2a464de5
+```
+
+`id` は `start` が表示したものです。**先頭数文字で足ります。**
+
+作業後もまだ壊れていれば、そこで通知が来ます。作業中も判定は続いていたので、
+直っていないことは Sentinel 側では最初から分かっています。
 
 ---
 
